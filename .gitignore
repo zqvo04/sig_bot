@@ -1,0 +1,22 @@
+# 민감 정보 — 절대 커밋 금지
+.env
+*.env
+secrets.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 로그 및 상태 파일
+logs/
+*.log
+bot_state.json
+/tmp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
