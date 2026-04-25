@@ -24,21 +24,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── uv 설치 (pip 대비 10~100배 빠른 패키지 매니저) ──
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          cache-dependency-glob: "requirements.txt"
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      # ── 의존성 설치 ──
       - name: Install dependencies
-        run: uv pip install -r requirements.txt --system "--only-binary=:all:"
+        run: pip install -r requirements.txt
 
       # ── 상태 복원 ──
       - name: Restore bot state
