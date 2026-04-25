@@ -1,0 +1,71 @@
+name: Crypto Signal Bot
+
+on:
+  repository_dispatch:
+    types: [run-signal-bot]
+  workflow_dispatch:
+
+concurrency:
+  group: signal-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    name: Run Signal Bot (${{ matrix.symbol }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    strategy:
+      matrix:
+        symbol: ["ETH/USDT", "HYPE/USDT"]
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── uv 설치 (pip 대비 10~100배 빠른 패키지 매니저) ──
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements.txt"
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 의존성 설치 ──
+      - name: Install dependencies
+        run: uv pip install -r requirements.txt --system "--only-binary=:all:"
+
+      # ── 상태 복원 ──
+      - name: Restore bot state
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/bot_state
+          key: bot-state-${{ matrix.symbol }}-${{ github.run_id }}
+          restore-keys: |
+            bot-state-${{ matrix.symbol }}-
+
+      - name: Prepare state directory
+        run: mkdir -p /tmp/bot_state
+
+      - name: Run signal bot
+        env:
+          OKX_API_KEY:        ${{ secrets.OKX_API_KEY }}
+          OKX_API_SECRET:     ${{ secrets.OKX_API_SECRET }}
+          OKX_PASSPHRASE:     ${{ secrets.OKX_PASSPHRASE }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          SINGLE_SYMBOL:      ${{ matrix.symbol }}
+        run: python src/main.py
+
+      # ── 상태 저장 ──
+      - name: Save bot state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/bot_state
+          key: bot-state-${{ matrix.symbol }}-${{ github.run_id }}
