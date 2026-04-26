@@ -13,7 +13,7 @@ OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "")
 
-SYMBOLS: list = ["BTC/USDT", "ETH/USDT", "HYPE/USDT", "SOL/USDT"]
+SYMBOLS: list = ["BTC/USDT", "ETH/USDT", "HYPE/USDT", "SOL/USDT","XRP/USDT"]
 
 TIMEFRAMES    = {"entry": "15m", "mid": "1h", "macro": "4h"}
 CANDLE_LIMITS = {"15m": 100, "1h": 210, "4h": 210}
