@@ -17,7 +17,7 @@ jobs:
 
     strategy:
       matrix:
-        symbol: ["BTC/USDT", "ETH/USDT", "HYPE/USDT", "SOL/USDT"]
+        symbol: ["BTC/USDT", "ETH/USDT", "HYPE/USDT", "SOL/USDT", "XRP/USDT"]
       fail-fast: false
 
     steps:
