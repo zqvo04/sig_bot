@@ -5,6 +5,16 @@ E: 강제청산 분석
 F: Taker Buy/Sell Volume 분석
 H: 시장 국면 자동 분류
 + 캔들 패턴 / 시장 구조 / 거래량 다이버전스 분석
+
+[변경 이력]
+- 제안A: 눌림목 RSI 기준 강화 (과매도/과매수 조건 명확화)
+  · 롱 weak  : 1h > 50 → 52 / 15m < 46 → 44
+  · 롱 micro : 15m < 50 → 45  ← 핵심 수정 (RSI 47~49 중립 오탐 차단)
+  · 숏 weak  : 1h < 50 → 48 / 15m > 54 → 56
+  · 숏 micro : 15m > 50 → 55  ← 핵심 수정 (RSI 51~54 중립 오탐 차단)
+- 제안D: 청산 감지 display 메타 추가
+  · analyze_liquidations() 반환 dict에 favorable_direction, display_hint 추가
+  · notification.py에서 display_hint 사용 시 방향 오표기 해소
 """
 import logging
 from typing import Optional
@@ -116,14 +126,32 @@ def analyze_mtf_rsi(df_15m, df_1h, df_4h) -> dict:
 
     long_score_raw, short_score_raw = _rsi_to_score(v_weighted)
 
-    pullback_long_strong  = (v_1h is not None and v_1h  > 58 and v_15m is not None and v_15m < 40)
-    pullback_long_weak    = (v_1h is not None and v_1h  > 50 and v_15m is not None and v_15m < 46 and not pullback_long_strong)
-    pullback_long_micro   = (v_1h is not None and v_1h  > 45 and v_15m is not None and v_15m < 50 and not pullback_long_strong and not pullback_long_weak)
+    # ══ [제안A] 눌림목 RSI 기준 강화 ══════════════════════════════
+    # 변경 이유: RSI 45~49 (사실상 중립)를 "과매도"로 처리하던 오탐 차단
+    #
+    # 롱 눌림목 (상승 추세 중 단기 눌림 → 반등 진입):
+    #   강: 1h 강세(>58) + 15m 실제 과매도(<40)         — 유지
+    #   약: 1h 중립 이상(>52) + 15m 명확 눌림(<44)      — 1h:50→52, 15m:46→44
+    #   미: 1h 최소 조건(>45) + 15m 최소 눌림(<45)      — 15m:50→45 ★핵심
+    #       (RSI 47~49가 '미세 눌림목'으로 처리되던 문제 해결)
+    #
+    # 숏 눌림목 (하락 추세 중 단기 반등 → 숏 진입):
+    #   강: 1h 약세(<42) + 15m 실제 과매수(>60)         — 유지
+    #   약: 1h 중립 이하(<48) + 15m 명확 과열(>56)      — 1h:50→48, 15m:54→56
+    #   미: 1h 최소 조건(<55) + 15m 최소 과열(>55)      — 15m:50→55 ★핵심
+    # ──────────────────────────────────────────────────────────────
+    pullback_long_strong  = (v_1h is not None and v_1h  > 58 and v_15m is not None and v_15m < 40)  # 유지
+    pullback_long_weak    = (v_1h is not None and v_1h  > 52 and v_15m is not None and v_15m < 44   # 1h:50→52, 15m:46→44
+                             and not pullback_long_strong)
+    pullback_long_micro   = (v_1h is not None and v_1h  > 45 and v_15m is not None and v_15m < 45   # 15m:50→45
+                             and not pullback_long_strong and not pullback_long_weak)
     pullback_long         = pullback_long_strong or pullback_long_weak or pullback_long_micro
 
-    pullback_short_strong = (v_1h is not None and v_1h  < 42 and v_15m is not None and v_15m > 60)
-    pullback_short_weak   = (v_1h is not None and v_1h  < 50 and v_15m is not None and v_15m > 54 and not pullback_short_strong)
-    pullback_short_micro  = (v_1h is not None and v_1h  < 55 and v_15m is not None and v_15m > 50 and not pullback_short_strong and not pullback_short_weak)
+    pullback_short_strong = (v_1h is not None and v_1h  < 42 and v_15m is not None and v_15m > 60)  # 유지
+    pullback_short_weak   = (v_1h is not None and v_1h  < 48 and v_15m is not None and v_15m > 56   # 1h:50→48, 15m:54→56
+                             and not pullback_short_strong)
+    pullback_short_micro  = (v_1h is not None and v_1h  < 55 and v_15m is not None and v_15m > 55   # 15m:50→55
+                             and not pullback_short_strong and not pullback_short_weak)
     pullback_short        = pullback_short_strong or pullback_short_weak or pullback_short_micro
 
     macro_bull = v_4h is not None and v_4h > 52
@@ -457,10 +485,23 @@ def analyze_taker_volume(taker_data: dict) -> dict:
 # ══════════════════════════════════════════════
 
 def analyze_liquidations(liq_data: dict, df_15m=None) -> dict:
+    """
+    캔들 꼬리 기반 청산 프록시 분석.
+
+    [제안D] 청산 방향 표시 수정:
+    - 기존: notification.py에서 "숏청산 감지 → 하락 가능"을 LONG/SHORT 신호 무관하게 표기
+    - 수정: favorable_direction / display_hint 필드 추가
+      · long_liq_detected  = 하방 꼬리 → 롱 포지션 청산 폭포 → 낙폭과대 후 반등 기대 → 롱 유리
+      · short_liq_detected = 상방 꼬리 → 숏 포지션 청산(숏스퀴즈) → 스파이크 후 되돌림 기대 → 숏 유리
+    - notification.py는 display_hint를 사용하고, 신호 방향(signal_direction)과
+      favorable_direction이 일치할 때만 강조 표시 권장
+    """
     _empty = {
         "long_score": 50, "short_score": 50,
         "signal": "none", "is_large": False,
         "long_liq_proxy": 0.0, "short_liq_proxy": 0.0,
+        "favorable_direction": None,   # [제안D] 추가
+        "display_hint": None,          # [제안D] 추가
         "available": False,
     }
     if df_15m is None or len(df_15m) < 15:
@@ -503,19 +544,40 @@ def analyze_liquidations(liq_data: dict, df_15m=None) -> dict:
     if long_liq_score  > short_liq_score and long_liq_score  > 0.15: signal = "long_liq_detected"
     elif short_liq_score > long_liq_score and short_liq_score > 0.15: signal = "short_liq_detected"
 
+    ls, ss = 50, 50
     if signal == "long_liq_detected":
         ls = round(60+long_liq_score*30,  2); ss = round(40-long_liq_score*10, 2)
-        if is_large: ls = min(100, ls+10); logger.info(f"[청산프록시] 💥 롱청산 감지 {'대규모' if is_large else ''}")
+        if is_large: ls = min(100, ls+10)
+        logger.info(f"[청산프록시] 💥 롱청산 감지 {'대규모' if is_large else ''} → 반등 기대(롱 유리)")
     elif signal == "short_liq_detected":
         ss = round(60+short_liq_score*30, 2); ls = round(40-short_liq_score*10, 2)
-        if is_large: ss = min(100, ss+10); logger.info(f"[청산프록시] 💥 숏청산 감지 {'대규모' if is_large else ''}")
-    else:
-        ls, ss = 50, 50
+        if is_large: ss = min(100, ss+10)
+        logger.info(f"[청산프록시] 💥 숏청산 감지 {'대규모' if is_large else ''} → 되돌림 기대(숏 유리)")
 
-    return {"long_score":round(min(100,max(0,ls)),2),"short_score":round(min(100,max(0,ss)),2),
-            "signal":signal,"is_large":is_large,
-            "long_liq_proxy":round(long_liq_score,4),"short_liq_proxy":round(short_liq_score,4),
-            "available":True}
+    # [제안D] 방향 메타 — notification.py에서 display_hint를 사용하세요
+    # notification.py 수정 가이드:
+    #   liq = analysis["liquidations"]
+    #   if liq["signal"] != "none" and liq["favorable_direction"] == signal_direction:
+    #       display_text = f"⚡ {liq['display_hint']}"
+    #   elif liq["signal"] != "none":
+    #       display_text = f"⚠️ {liq['display_hint']} (현재 진입 방향과 반대)"
+    _liq_display_map = {
+        "long_liq_detected":  ("long",  "롱청산 감지 → 반등 기대"),   # 하방 꼬리 = 롱 유리
+        "short_liq_detected": ("short", "숏청산 감지 → 되돌림 기대"), # 상방 꼬리 = 숏 유리
+    }
+    favorable_direction, display_hint = _liq_display_map.get(signal, (None, None))
+
+    return {
+        "long_score":          round(min(100,max(0,ls)),2),
+        "short_score":         round(min(100,max(0,ss)),2),
+        "signal":              signal,
+        "is_large":            is_large,
+        "long_liq_proxy":      round(long_liq_score,4),
+        "short_liq_proxy":     round(short_liq_score,4),
+        "favorable_direction": favorable_direction,   # [제안D] 신규
+        "display_hint":        display_hint,          # [제안D] 신규
+        "available":           True,
+    }
 
 
 # ══════════════════════════════════════════════
