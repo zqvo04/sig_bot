@@ -44,7 +44,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from microstructure_analyzer_v2 import fetch_all_microstructure
+from microstructure_analyzer    import fetch_all_microstructure
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +442,32 @@ def collect(exchange: ccxt.okx, symbol: str) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # 거래소 연결 체크 (선택적 헬스체크)
 # ══════════════════════════════════════════════════════════════════════════════
+
+def collect_all_data(exchange: ccxt.okx, symbols: list) -> dict:
+    """
+    여러 심볼 일괄 수집 — main.py 진입점
+    
+    Args:
+        exchange: create_exchange()로 생성한 거래소 객체
+        symbols:  수집할 심볼 리스트, e.g. ["BTC/USDT", "ETH/USDT"]
+                  SINGLE_SYMBOL 환경변수가 설정된 경우 해당 심볼만 수집
+
+    Returns:
+        { symbol: collected_data_dict, ... }
+    """
+    # GitHub Actions Matrix Job: SINGLE_SYMBOL 환경변수로 단일 심볼 지정
+    single = os.environ.get("SINGLE_SYMBOL", "").strip()
+    target_symbols = [single] if single else symbols
+
+    results = {}
+    for symbol in target_symbols:
+        try:
+            results[symbol] = collect(exchange, symbol)
+        except Exception as e:
+            logger.error(f"[Pipeline] {symbol} 수집 중 오류: {e}")
+            results[symbol] = None
+    return results
+
 
 def check_connection(exchange: ccxt.okx) -> bool:
     """API 연결 및 인증 상태 확인"""
