@@ -1,57 +1,106 @@
 """
-microstructure_analyzer.py  (v2.1 — 최종 버전)
+microstructure_analyzer.py  (v2.1 — API 수정 버전)
 ──────────────────────────────────────────────────────────────────────────────
-v2 → v2.1 변경:
-  [Fix Issue 6] direction 대소문자 정규화
-    - 모든 direction 수신 함수 첫 줄에 direction = direction.upper() 추가
-    - 기존 코드(소문자 "long"/"short")와 호환
+[수정 사항]
+- _okx_get(): OKX 공개 API 직접 호출 헬퍼 추가
+- fetch_liquidation_data: publicGetPublicLiquidationOrders 없음
+  → CCXT fetchLiquidations() 사용
+- fetch_mark_funding_data: fetch_funding_rate swap 심볼 형식 사용
+- fetch_account_ls_ratio: publicGetRubikStatContractsLongShortAccountRatio
+  → 직접 HTTP 호출로 변경 ('ccy can't be empty' 오류 해결)
+- fetch_oi_history: fetchOpenInterestHistory CCXT 표준 메서드 사용
+
+[Fix Issue 6] direction 대소문자 정규화 (모든 함수에 direction.upper() 적용)
 ──────────────────────────────────────────────────────────────────────────────
 """
+
 import logging
 import time
 from typing import Optional, Tuple
+
+import requests as req
 
 logger = logging.getLogger(__name__)
 
 MICRO_PENALTY_CAP = -30
 
 
-def _to_instId(s: str) -> str: return s.replace('/', '-').split(':')[0] + '-SWAP'
-def _to_uly(s: str)    -> str: return s.replace('/', '-').split(':')[0]
+# ══════════════════════════════════════════════════════════════════════════════
+# 유틸리티
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _to_ccxt_swap(symbol: str) -> str:
+    """BTC/USDT → BTC/USDT:USDT"""
+    if ':' in symbol:
+        return symbol
+    parts = symbol.split('/')
+    if len(parts) != 2:
+        return symbol
+    return f"{parts[0]}/{parts[1]}:{parts[1]}"
+
+def _to_base_id(symbol: str) -> str:
+    """BTC/USDT → BTC-USDT"""
+    return symbol.replace('/', '-').split(':')[0]
+
+def _to_swap_id(symbol: str) -> str:
+    """BTC/USDT → BTC-USDT-SWAP"""
+    return _to_base_id(symbol) + '-SWAP'
+
+def _okx_get(path: str, params: dict = None) -> dict:
+    """OKX 공개 API 직접 HTTP 호출 (인증 불필요)"""
+    url = f"https://www.okx.com/api/v5{path}"
+    try:
+        r = req.get(url, params=params or {}, timeout=10)
+        return r.json()
+    except Exception as e:
+        logger.warning(f"[OKX-HTTP] {path} 실패: {e}")
+        return {"code": "error", "data": [], "msg": str(e)}
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # 방안 1: Liquidation Cascade Discriminator
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_liquidation_data(exchange, symbol: str, lookback_minutes: int = 30) -> dict:
+    """
+    최근 청산 데이터 수집.
+    [수정] publicGetPublicLiquidationOrders 없음 → CCXT fetchLiquidations() 사용
+    side='buy':  숏 포지션 강제청산 → 상승 압력
+    side='sell': 롱 포지션 강제청산 → 하락 압력
+    """
     empty = {'long_liq_vol': 0, 'short_liq_vol': 0, 'long_liq_count': 0,
              'short_liq_count': 0, 'total_vol': 0, 'available': False}
     try:
-        resp = exchange.publicGetPublicLiquidationOrders(
-            {'instType': 'SWAP', 'uly': _to_uly(symbol), 'state': 'filled', 'limit': '100'}
-        )
-        if not resp.get('data'):
-            return empty
-        cutoff = (time.time() - lookback_minutes * 60) * 1000
+        swap_symbol = _to_ccxt_swap(symbol)
+        since_ms    = int((time.time() - lookback_minutes * 60) * 1000)
+
+        liqs = exchange.fetch_liquidations(swap_symbol, since=since_ms, limit=100)
+
         lv = sv = lc = sc = 0.0
-        for item in resp['data']:
-            for d in item.get('details', []):
-                if float(d.get('ts', 0)) < cutoff: continue
-                sz = float(d.get('sz', 0))
-                if d.get('side') == 'buy':    sv += sz; sc += 1
-                elif d.get('side') == 'sell': lv += sz; lc += 1
-        return {'long_liq_vol': lv, 'short_liq_vol': sv,
-                'long_liq_count': int(lc), 'short_liq_count': int(sc),
-                'total_vol': lv + sv, 'available': True}
+        for liq in liqs:
+            side = liq.get('side', '')
+            sz   = float(liq.get('amount') or liq.get('contracts') or 0)
+            if side == 'buy':    sv += sz; sc += 1   # 숏 청산
+            elif side == 'sell': lv += sz; lc += 1   # 롱 청산
+
+        return {
+            'long_liq_vol':    lv,
+            'short_liq_vol':   sv,
+            'long_liq_count':  int(lc),
+            'short_liq_count': int(sc),
+            'total_vol':       lv + sv,
+            'available':       True,
+        }
     except Exception as e:
-        logger.warning(f"[Micro/Liq] 수집 실패 ({symbol}): {e}"); return empty
+        logger.warning(f"[Micro/Liq] 수집 실패 ({symbol}): {e}")
+        return empty
 
 
 def analyze_liquidation_cascade(liq: dict, taker_buy_pct: float, direction: str) -> Tuple[int, str]:
-    direction = direction.upper()  # [Fix Issue 6]
-    if not liq.get('available') or liq['total_vol'] == 0: return 0, ""
-    t = liq['total_vol']
+    direction = direction.upper()
+    if not liq.get('available') or liq['total_vol'] == 0:
+        return 0, ""
+    t  = liq['total_vol']
     sr = liq['short_liq_vol'] / t
     lr = liq['long_liq_vol']  / t
     tk = taker_buy_pct / 100.0
@@ -73,13 +122,13 @@ def analyze_liquidation_cascade(liq: dict, taker_buy_pct: float, direction: str)
     return p, r
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # 방안 2: Order Book Structural Pressure
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_orderbook_data(exchange, symbol: str, depth: int = 20) -> dict:
     try:
-        b = exchange.fetch_order_book(symbol, limit=depth)
+        b = exchange.fetch_order_book(_to_ccxt_swap(symbol), limit=depth)
         return {'bids': b['bids'], 'asks': b['asks'], 'available': True}
     except Exception as e:
         logger.warning(f"[Micro/OB] 수집 실패 ({symbol}): {e}")
@@ -89,7 +138,7 @@ def fetch_orderbook_data(exchange, symbol: str, depth: int = 20) -> dict:
 def analyze_orderbook_pressure(
     books: dict, current_price: float, direction: str, depth: int = 20
 ) -> Tuple[int, str, Optional[float]]:
-    direction = direction.upper()  # [Fix Issue 6]
+    direction = direction.upper()
     if not books.get('available') or not books['bids'] or not books['asks']:
         return 0, "", None
     bids, asks = books['bids'], books['asks']
@@ -109,52 +158,52 @@ def analyze_orderbook_pressure(
                 wp, wv = ask_walls[0]; wd = (wp - current_price)/current_price; wr = wv/avg_ask
                 if wd < 0.003:   p = -12; r = f"⚠️[OB] ask벽 {wd:.2%}내 {wr:.1f}배 — 즉시저항"
                 elif wd < 0.005: p = -5;  r = f"⚠️[OB] ask벽 {wd:.2%}내 {wr:.1f}배"
-            if imbalance < 0.35: logger.debug(f"[OB/참고] 매도우세 {imbalance:.0%} (패널티 미적용)")
+            if imbalance < 0.35: logger.debug(f"[OB/참고] 매도우세 {imbalance:.0%}")
             if bid_walls: suggested = bid_walls[-1][0] * 1.001
         elif direction == "SHORT":
             if bid_walls:
                 wp, wv = bid_walls[0]; wd = (current_price - wp)/current_price; wr = wv/avg_bid
                 if wd < 0.003:   p = -12; r = f"⚠️[OB] bid벽 {wd:.2%}내 {wr:.1f}배 — 즉시지지"
                 elif wd < 0.005: p = -5;  r = f"⚠️[OB] bid벽 {wd:.2%}내 {wr:.1f}배"
-            if imbalance > 0.65: logger.debug(f"[OB/참고] 매수우세 {imbalance:.0%} (패널티 미적용)")
+            if imbalance > 0.65: logger.debug(f"[OB/참고] 매수우세 {imbalance:.0%}")
             if ask_walls: suggested = ask_walls[-1][0] * 0.999
         return p, r, suggested
     except Exception as e:
         logger.warning(f"[Micro/OB] 분석 실패: {e}"); return 0, "", None
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # 방안 3: OI Velocity Matrix
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_oi_history(exchange, symbol: str, periods: int = 12) -> list:
+    """
+    OI 5분봉 히스토리.
+    [수정] fetchOpenInterestHistory CCXT 표준 메서드 사용
+    """
     try:
-        instId = _to_instId(symbol)
-        try:
-            oi_list = exchange.fetch_open_interest_history(symbol, '5m', limit=periods)
-            ohlcv   = exchange.fetch_ohlcv(symbol, '5m', limit=periods)
-            pm      = {c[0]: c[4] for c in ohlcv}
-            return [{'oi': float(x.get('openInterestAmount', 0)),
-                     'close': pm.get(x.get('timestamp', 0), 0),
-                     'ts': x.get('timestamp', 0)} for x in oi_list[-periods:]]
-        except Exception:
-            resp = exchange.publicGetRubikStatContractsOpenInterestHistory(
-                {'instType': 'SWAP', 'instId': instId, 'period': '5m', 'limit': str(periods)}
-            )
-            if not resp.get('data'): return []
-            ohlcv = exchange.fetch_ohlcv(symbol, '5m', limit=periods)
-            pm    = {str(c[0]): c[4] for c in ohlcv}
-            result = []
-            for row in reversed(resp['data']):
-                ts = int(row[0])
-                result.append({'oi': float(row[1]), 'close': pm.get(str(ts), 0), 'ts': ts})
-            return result[-periods:]
+        swap_symbol = _to_ccxt_swap(symbol)
+
+        # CCXT 표준 메서드
+        oi_list = exchange.fetch_open_interest_history(swap_symbol, '5m', limit=periods)
+        ohlcv   = exchange.fetch_ohlcv(swap_symbol, '5m', limit=periods)
+        pm      = {c[0]: c[4] for c in ohlcv}
+
+        result = []
+        for x in oi_list[-periods:]:
+            ts  = x.get('timestamp', 0)
+            oi  = float(x.get('openInterestAmount') or x.get('openInterest') or 0)
+            px  = pm.get(ts, 0)
+            result.append({'oi': oi, 'close': px, 'ts': ts})
+        return result
+
     except Exception as e:
-        logger.warning(f"[Micro/OI] 수집 실패 ({symbol}): {e}"); return []
+        logger.warning(f"[Micro/OI] 수집 실패 ({symbol}): {e}")
+        return []
 
 
 def analyze_oi_velocity(oi_history: list, direction: str, regime: str = "") -> Tuple[int, str]:
-    direction = direction.upper()  # [Fix Issue 6]
+    direction = direction.upper()
     if len(oi_history) < 6: return 0, ""
     try:
         e3 = oi_history[:3]; r3 = oi_history[-3:]
@@ -192,9 +241,9 @@ def analyze_oi_velocity(oi_history: list, direction: str, regime: str = "") -> T
         logger.warning(f"[Micro/OI] 분석 실패: {e}"); return 0, ""
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 방안 4: BB Direction Compatibility Filter
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 방안 4: BB Direction Compatibility Filter (API 호출 없음)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _ranging_bb_raw(pb: float, d: str) -> Tuple[int, str]:
     d = d.upper()
@@ -209,7 +258,7 @@ def _ranging_bb_raw(pb: float, d: str) -> Tuple[int, str]:
 
 
 def analyze_bb_direction_compatibility(percent_b: float, direction: str, regime: str) -> Tuple[int, str]:
-    direction = direction.upper()  # [Fix Issue 6]
+    direction = direction.upper()
     p, r = 0, ""
     if regime == "RANGING":
         if direction == "SHORT":
@@ -232,27 +281,44 @@ def analyze_bb_direction_compatibility(percent_b: float, direction: str, regime:
     return p, r
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # 방안 6: Mark Price Basis + Next Funding Rate
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_mark_funding_data(exchange, symbol: str) -> dict:
-    res = {'mark_price': None, 'current_funding_rate': None, 'next_funding_rate': None, 'available': False}
+    """
+    마크 가격 + 현재/차기 펀딩비.
+    [수정] fetch_funding_rate에 swap 심볼 형식 사용 (BTC/USDT:USDT)
+    """
+    res = {'mark_price': None, 'current_funding_rate': None,
+           'next_funding_rate': None, 'available': False}
+
+    # 마크 가격 — 직접 HTTP (CCXT 메서드 없음)
     try:
-        resp = exchange.publicGetPublicMarkPrice({'instType': 'SWAP', 'instId': _to_instId(symbol)})
-        if resp.get('data'): res['mark_price'] = float(resp['data'][0]['markPx'])
-    except Exception as e: logger.warning(f"[Micro/MF] 마크가격 실패: {e}")
+        resp = _okx_get('/public/mark-price', {
+            'instType': 'SWAP',
+            'instId':   _to_swap_id(symbol),
+        })
+        if resp.get('data'):
+            res['mark_price'] = float(resp['data'][0]['markPx'])
+    except Exception as e:
+        logger.warning(f"[Micro/MF] 마크가격 실패: {e}")
+
+    # 펀딩비 — CCXT fetch_funding_rate (swap 심볼 형식 필수)
     try:
-        fr = exchange.fetch_funding_rate(symbol)
+        swap_symbol = _to_ccxt_swap(symbol)   # ← 수정
+        fr = exchange.fetch_funding_rate(swap_symbol)
         res['current_funding_rate'] = float(fr.get('fundingRate',     0) or 0)
         res['next_funding_rate']    = float(fr.get('nextFundingRate', 0) or 0)
-    except Exception as e: logger.warning(f"[Micro/MF] 펀딩비 실패: {e}")
+    except Exception as e:
+        logger.warning(f"[Micro/MF] 펀딩비 실패: {e}")
+
     res['available'] = res['mark_price'] is not None or res['next_funding_rate'] is not None
     return res
 
 
 def analyze_mark_funding_composite(mf: dict, current_price: float, direction: str) -> Tuple[int, str]:
-    direction = direction.upper()  # [Fix Issue 6]
+    direction = direction.upper()
     if not mf.get('available'): return 0, ""
     p = 0; parts = []
     mark = mf.get('mark_price')
@@ -285,25 +351,38 @@ def analyze_mark_funding_composite(mf: dict, current_price: float, direction: st
     return p, " | ".join(f"[MF]{x}" for x in parts) if parts else ""
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # 방안 7: Account-Level vs Position-Level LS Divergence
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_account_ls_ratio(exchange, symbol: str) -> Optional[float]:
+    """
+    계좌 수 기준 LS 비율.
+    [수정] CCXT publicGetRubikStatContractsLongShortAccountRatio → 직접 HTTP 호출
+           ('ccy can't be empty' CCXT 파라미터 매핑 오류 해결)
+    OKX: GET /api/v5/rubik/stat/contracts/long-short-account-ratio
+    """
     try:
-        base = symbol.split('/')[0] + '-' + symbol.split('/')[1].split(':')[0]
-        resp = exchange.publicGetRubikStatContractsLongShortAccountRatio(
-            {'instId': base, 'period': '5m', 'limit': '1'}
-        )
-        if not resp.get('data'): return None
-        ratio = float(resp['data'][0][1])
-        return ratio / (1.0 + ratio)
+        resp = _okx_get('/rubik/stat/contracts/long-short-account-ratio', {
+            'instId': _to_base_id(symbol),
+            'period': '5m',
+            'limit':  '1',
+        })
+        if not resp.get('data'):
+            return None
+
+        # [[timestamp, longShortRatio], ...]
+        ratio    = float(resp['data'][0][1])
+        long_pct = ratio / (1.0 + ratio)
+        return long_pct
+
     except Exception as e:
-        logger.warning(f"[Micro/LS] 계좌LS 실패 ({symbol}): {e}"); return None
+        logger.warning(f"[Micro/LS] 계좌LS 실패 ({symbol}): {e}")
+        return None
 
 
 def analyze_ls_divergence(account_long_pct: Optional[float], position_long_pct: float, direction: str) -> Tuple[int, str]:
-    direction = direction.upper()  # [Fix Issue 6]
+    direction = direction.upper()
     if account_long_pct is None: return 0, ""
     div = account_long_pct - position_long_pct
     s   = f"계좌:{account_long_pct:.1%} 포지션:{position_long_pct:.1%} 괴리:{div:+.1%}"
@@ -321,9 +400,9 @@ def analyze_ls_divergence(account_long_pct: Optional[float], position_long_pct: 
     return p, r
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # 통합 수집
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_all_microstructure(exchange, symbol: str) -> dict:
     logger.info(f"[Microstructure] 📡 수집: {symbol}")
@@ -334,28 +413,31 @@ def fetch_all_microstructure(exchange, symbol: str) -> dict:
         'mark_funding': fetch_mark_funding_data(exchange, symbol),
         'account_ls':   fetch_account_ls_ratio(exchange, symbol),
     }
-    ok = sum([data['liquidation']['available'], data['orderbook']['available'],
-              len(data['oi_history']) > 0, data['mark_funding']['available'],
-              data['account_ls'] is not None])
+    ok = sum([
+        data['liquidation']['available'],
+        data['orderbook']['available'],
+        len(data['oi_history']) > 0,
+        data['mark_funding']['available'],
+        data['account_ls'] is not None,
+    ])
     logger.info(f"[Microstructure] ✅ {ok}/5 방안 활성")
     return data
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 통합 패널티 계산 (메인 진입점)
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 통합 패널티 계산
+# ══════════════════════════════════════════════════════════════════════════════
 
 def compute_microstructure_penalties(
     micro_data:        dict,
     current_price:     float,
-    direction:         str,          # "long"/"LONG" 모두 허용
+    direction:         str,
     regime:            str,
     percent_b:         float,
     taker_buy_pct:     float,
     position_long_pct: float,
 ) -> dict:
-    direction = direction.upper()    # [Fix Issue 6] 정규화
-
+    direction = direction.upper()
     checks = []; suggested = None
 
     p1, r1 = analyze_liquidation_cascade(micro_data.get('liquidation', {}), taker_buy_pct, direction)
