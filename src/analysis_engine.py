@@ -2,13 +2,14 @@
 analysis_engine.py — 분석 엔진
 [이번 변경]
 - Hidden Divergence (추세 지속 확증) 추가
-- analyze_mtf_rsi: pullback_long_weak / _micro 플래그 명시 반환 (scoring_system 분리 버그 수정용)
+- analyze_mtf_rsi: pullback_long_weak / _micro 플래그 명시 반환
 - analyze_market_structure: 스윙 임계값 0.2%→0.5%
 - analyze_vol_price_divergence: 임계값 0.3%+30%→0.5%+50%
-- 신규: detect_fvg (Fair Value Gap)
-- 신규: detect_bos_choch (BOS / CHoCH)
-- 신규: check_fibonacci_levels (황금포켓 / 주요레벨)
+- 신규: detect_fvg, detect_bos_choch, check_fibonacci_levels
 - run_full_analysis: 신규 함수 통합
+[Fix Issue 1] calculate_ema_multiplier: regime 파라미터 추가
+  - 국면별 EMA 배율 테이블 사용 → 로그와 실제 적용값 일치
+  - run_full_analysis에서 regime 확정 후 호출되도록 순서 보장
 """
 import logging
 from typing import Optional
@@ -95,41 +96,24 @@ def _rsi_to_score(v: float) -> tuple:
 
 
 def _detect_bull_div(df, rsi, lb=6) -> bool:
-    """일반 강세 다이버전스: 가격 신저가 + RSI 더 높은 저점 → 반전 신호"""
     if df is None or len(df)<lb*2: return False
     c=df["close"].values; r=rsi.values
     return bool(c[-lb:].min()<c[-lb*2:-lb].min() and r[-lb:].min()>r[-lb*2:-lb].min())
 
 def _detect_bear_div(df, rsi, lb=6) -> bool:
-    """일반 약세 다이버전스: 가격 신고가 + RSI 더 낮은 고점 → 반전 신호"""
     if df is None or len(df)<lb*2: return False
     c=df["close"].values; r=rsi.values
     return bool(c[-lb:].max()>c[-lb*2:-lb].max() and r[-lb:].max()<r[-lb*2:-lb].max())
 
 def _detect_hidden_bull_div(df, rsi, lb=8) -> bool:
-    """
-    히든 강세 다이버전스: 추세 지속 확증 (눌림목 롱에 최적)
-    - 가격: 더 높은 저점 (Higher Low) — 상승 추세 구조 유지
-    - RSI:  더 낮은 저점 (Lower Low)  — 기술적 과열만 해소됨
-    → 가격이 덜 빠졌는데 RSI만 더 빠짐 = 매수세 여전히 강함
-    """
     if df is None or len(df) < lb*2: return False
     c = df["close"].values; r = rsi.values
-    price_higher_low = c[-lb:].min() > c[-lb*2:-lb].min()
-    rsi_lower_low    = r[-lb:].min() < r[-lb*2:-lb].min()
-    return bool(price_higher_low and rsi_lower_low)
+    return bool(c[-lb:].min() > c[-lb*2:-lb].min() and r[-lb:].min() < r[-lb*2:-lb].min())
 
 def _detect_hidden_bear_div(df, rsi, lb=8) -> bool:
-    """
-    히든 약세 다이버전스: 추세 지속 확증 (반등 숏에 최적)
-    - 가격: 더 낮은 고점 (Lower High) — 하락 추세 구조 유지
-    - RSI:  더 높은 고점 (Higher High) — 기술적 반등만 있었음
-    """
     if df is None or len(df) < lb*2: return False
     c = df["close"].values; r = rsi.values
-    price_lower_high = c[-lb:].max() < c[-lb*2:-lb].max()
-    rsi_higher_high  = r[-lb:].max() > r[-lb*2:-lb].max()
-    return bool(price_lower_high and rsi_higher_high)
+    return bool(c[-lb:].max() < c[-lb*2:-lb].max() and r[-lb:].max() > r[-lb*2:-lb].max())
 
 
 def analyze_mtf_rsi(df_15m, df_1h, df_4h) -> dict:
@@ -153,8 +137,6 @@ def analyze_mtf_rsi(df_15m, df_1h, df_4h) -> dict:
 
     long_score_raw, short_score_raw = _rsi_to_score(v_weighted)
 
-    # ── [제안A] 눌림목 RSI 기준 (강화) ─────────────────────────
-    # 미세 기준 핵심 수정: 15m < 50(기존) → 15m < 45 (RSI 47~49 중립 오탐 차단)
     pullback_long_strong  = (v_1h is not None and v_1h  > 58 and v_15m is not None and v_15m < 40)
     pullback_long_weak    = (v_1h is not None and v_1h  > 52 and v_15m is not None and v_15m < 44
                              and not pullback_long_strong)
@@ -187,12 +169,11 @@ def analyze_mtf_rsi(df_15m, df_1h, df_4h) -> dict:
     long_score  = round(min(100,max(0,long_score_raw)),  2)
     short_score = round(min(100,max(0,short_score_raw)), 2)
 
-    # ── 다이버전스 (일반 + Hidden) ─────────────────────────────
     rsi_15m_series = calculate_rsi(df_15m) if df_15m is not None and len(df_15m)>=12 else None
-    bull_div         = bool(_detect_bull_div(df_15m, rsi_15m_series))        if rsi_15m_series is not None else False
-    bear_div         = bool(_detect_bear_div(df_15m, rsi_15m_series))        if rsi_15m_series is not None else False
-    hidden_bull_div  = bool(_detect_hidden_bull_div(df_15m, rsi_15m_series)) if rsi_15m_series is not None and len(df_15m)>=16 else False
-    hidden_bear_div  = bool(_detect_hidden_bear_div(df_15m, rsi_15m_series)) if rsi_15m_series is not None and len(df_15m)>=16 else False
+    bull_div        = bool(_detect_bull_div(df_15m, rsi_15m_series))        if rsi_15m_series is not None else False
+    bear_div        = bool(_detect_bear_div(df_15m, rsi_15m_series))        if rsi_15m_series is not None else False
+    hidden_bull_div = bool(_detect_hidden_bull_div(df_15m, rsi_15m_series)) if rsi_15m_series is not None and len(df_15m)>=16 else False
+    hidden_bear_div = bool(_detect_hidden_bear_div(df_15m, rsi_15m_series)) if rsi_15m_series is not None and len(df_15m)>=16 else False
 
     v15_str = f"{v_15m:.1f}" if v_15m is not None else "N/A"
     v1h_str = f"{v_1h:.1f}"  if v_1h  is not None else "N/A"
@@ -221,16 +202,16 @@ def analyze_mtf_rsi(df_15m, df_1h, df_4h) -> dict:
         "short_score":         short_score,
         "bullish_divergence":  bull_div,
         "bearish_divergence":  bear_div,
-        "hidden_bull_div":     hidden_bull_div,   # 신규
-        "hidden_bear_div":     hidden_bear_div,   # 신규
+        "hidden_bull_div":     hidden_bull_div,
+        "hidden_bear_div":     hidden_bear_div,
         "pullback_long":       pullback_long,
         "pullback_short":      pullback_short,
         "pullback_long_strong":  pullback_long_strong,
-        "pullback_long_weak":    pullback_long_weak,    # 신규 (scoring 분리 버그 수정용)
-        "pullback_long_micro":   pullback_long_micro,   # 신규
+        "pullback_long_weak":    pullback_long_weak,
+        "pullback_long_micro":   pullback_long_micro,
         "pullback_short_strong": pullback_short_strong,
-        "pullback_short_weak":   pullback_short_weak,   # 신규
-        "pullback_short_micro":  pullback_short_micro,  # 신규
+        "pullback_short_weak":   pullback_short_weak,
+        "pullback_short_micro":  pullback_short_micro,
     }
 
 
@@ -308,7 +289,7 @@ def _empty_bb() -> dict:
 
 
 # ══════════════════════════════════════════════
-# A: EMA 교차 → 배율 계산
+# A: EMA 교차 → 배율 계산  [Fix Issue 1]
 # ══════════════════════════════════════════════
 
 def _calc_ema(series: pd.Series, period: int) -> pd.Series:
@@ -323,7 +304,13 @@ def _ema_direction(df: pd.DataFrame) -> str:
     if gap_pct < 0.0005: return "neutral"
     return "bullish" if ema_fast>ema_slow else "bearish"
 
-def calculate_ema_multiplier(ohlcv_dict: dict, direction: str) -> dict:
+def calculate_ema_multiplier(ohlcv_dict: dict, direction: str, regime: str = "UNKNOWN") -> dict:
+    """
+    [Fix Issue 1] regime 파라미터 추가
+    - 국면별 EMA 배율 테이블(REGIME_EMA_MULTIPLIERS)을 사용하여
+      로그에 찍히는 배율과 실제 scoring_system에서 적용하는 배율을 일치시킴
+    - run_full_analysis에서 regime 확정 후 호출해야 정확한 값 로깅됨
+    """
     tf_signals = {
         "15m": _ema_direction(ohlcv_dict.get("15m")),
         "1h":  _ema_direction(ohlcv_dict.get("1h")),
@@ -332,14 +319,26 @@ def calculate_ema_multiplier(ohlcv_dict: dict, direction: str) -> dict:
     opposite      = "bearish" if direction == "long" else "bullish"
     reverse_count = sum(1 for sig in tf_signals.values() if sig == opposite)
     same_count    = sum(1 for sig in tf_signals.values() if sig == ("bullish" if direction=="long" else "bearish"))
-    multiplier    = config.EMA_MULTIPLIER.get(reverse_count, 1.0)
+
+    # [Fix Issue 1] 국면별 배율 테이블 사용
+    regime_mult_table = config.REGIME_EMA_MULTIPLIERS.get(regime, config.EMA_MULTIPLIER)
+    multiplier        = regime_mult_table.get(reverse_count, 1.0)
+
     if same_count == 3:    ema_dir = "bullish" if direction=="long" else "bearish"
     elif reverse_count==3: ema_dir = "bearish" if direction=="long" else "bullish"
     else:                  ema_dir = "mixed"
-    logger.info(f"[EMA배율/{direction.upper()}] {tf_signals} → ×{multiplier:.2f}")
-    return {"tf_signals":tf_signals,"same_count":same_count,"reverse_count":reverse_count,
-            "multiplier":multiplier,"direction":ema_dir,
-            "reason":f"EMA {same_count}/3 {direction}방향 일치 (역방향:{reverse_count}개 → ×{multiplier:.2f})"}
+
+    # [Fix Issue 1] 로그에 regime 포함 → 배율 불일치 혼란 방지
+    logger.info(f"[EMA배율/{direction.upper()}] {tf_signals} → ×{multiplier:.2f}  [{regime}]")
+    return {
+        "tf_signals":    tf_signals,
+        "same_count":    same_count,
+        "reverse_count": reverse_count,
+        "multiplier":    multiplier,
+        "direction":     ema_dir,
+        "regime":        regime,
+        "reason":        f"EMA {same_count}/3 {direction}방향 일치 (역방향:{reverse_count}개 → ×{multiplier:.2f}) [{regime}]"
+    }
 
 
 # ══════════════════════════════════════════════
@@ -461,7 +460,7 @@ def analyze_taker_volume(taker_data: dict) -> dict:
 
 
 # ══════════════════════════════════════════════
-# E: 강제청산 프록시 [제안D 적용]
+# E: 강제청산 프록시
 # ══════════════════════════════════════════════
 
 def analyze_liquidations(liq_data: dict, df_15m=None) -> dict:
@@ -490,7 +489,7 @@ def analyze_liquidations(liq_data: dict, df_15m=None) -> dict:
         price_chg=abs(p1-p0)/p0 if p0>0 else 0.0
     is_large=price_chg>0.02 and (long_liq_score>0.25 or short_liq_score>0.25)
     signal="none"
-    if long_liq_score>short_liq_score and long_liq_score>0.15:  signal="long_liq_detected"
+    if long_liq_score>short_liq_score and long_liq_score>0.15:    signal="long_liq_detected"
     elif short_liq_score>long_liq_score and short_liq_score>0.15: signal="short_liq_detected"
     ls,ss=50,50
     if signal=="long_liq_detected":
@@ -601,255 +600,124 @@ def evaluate_gates(direction: str, funding: dict, ls_ratio_result: dict) -> dict
 
 
 # ══════════════════════════════════════════════
-# [신규] FVG (Fair Value Gap) 감지
+# FVG, BOS/CHoCH, 피보나치 (기존과 동일)
 # ══════════════════════════════════════════════
 
 def detect_fvg(df: pd.DataFrame, lookback: int = 30) -> dict:
-    """
-    Fair Value Gap (공정가치 갭 / Imbalance) 감지
-
-    강세 FVG: 캔들[i-2].고점 < 캔들[i].저점 → 상방 가격 공백
-              = 기관 급격한 매수로 매도 호가 공백 발생 → 롱 유리
-    약세 FVG: 캔들[i-2].저점 > 캔들[i].고점 → 하방 가격 공백
-              = 기관 급격한 매도로 매수 호가 공백 발생 → 숏 유리
-
-    현재 가격이 미충전 FVG 내부 = 기관 미체결 주문 대기 구간 → 반등/하락 기대
-    """
-    _empty = {
-        "in_bullish_fvg":False,"in_bearish_fvg":False,
-        "bullish_fvg_count":0,"bearish_fvg_count":0,
-        "nearest_bullish_fvg":None,"nearest_bearish_fvg":None,
-    }
+    _empty = {"in_bullish_fvg":False,"in_bearish_fvg":False,
+              "bullish_fvg_count":0,"bearish_fvg_count":0,
+              "nearest_bullish_fvg":None,"nearest_bearish_fvg":None}
     if df is None or len(df) < 5: return _empty
     try:
-        lb      = min(lookback, len(df))
-        high    = df["high"].astype(float).values[-lb:]
-        low     = df["low"].astype(float).values[-lb:]
-        close   = df["close"].astype(float).values[-lb:]
-        current = close[-1]
-
-        bullish_fvgs, bearish_fvgs = [], []
-        # 마지막 2캔들 제외 (형성 중 캔들 편향 방지)
-        for i in range(2, lb - 2):
-            if high[i-2] < low[i]:                          # 강세 FVG
-                bullish_fvgs.append((high[i-2], low[i]))
-            if low[i-2] > high[i]:                          # 약세 FVG
-                bearish_fvgs.append((high[i], low[i-2]))
-
-        # 미충전 FVG: 현재 가격이 통과하지 않은 것만
-        # 강세 FVG: 가격이 FVG 상단 위로 이미 올라간 것 제외
-        active_bull = [(b, t) for b, t in bullish_fvgs if current >= b * 0.99]
-        active_bear = [(b, t) for b, t in bearish_fvgs if current <= t * 1.01]
-
-        in_bullish_fvg = any(b <= current <= t for b, t in active_bull)
-        in_bearish_fvg = any(b <= current <= t for b, t in active_bear)
-
-        nearest_bull = (min(active_bull, key=lambda x: abs((x[0]+x[1])/2 - current))
-                        if active_bull else None)
-        nearest_bear = (min(active_bear, key=lambda x: abs((x[0]+x[1])/2 - current))
-                        if active_bear else None)
-
+        lb=min(lookback,len(df)); high=df["high"].astype(float).values[-lb:]
+        low=df["low"].astype(float).values[-lb:]; close=df["close"].astype(float).values[-lb:]
+        current=close[-1]; bullish_fvgs=[]; bearish_fvgs=[]
+        for i in range(2,lb-2):
+            if high[i-2]<low[i]:  bullish_fvgs.append((high[i-2],low[i]))
+            if low[i-2]>high[i]:  bearish_fvgs.append((high[i],low[i-2]))
+        active_bull=[(b,t) for b,t in bullish_fvgs if current>=b*0.99]
+        active_bear=[(b,t) for b,t in bearish_fvgs if current<=t*1.01]
+        in_bullish_fvg=any(b<=current<=t for b,t in active_bull)
+        in_bearish_fvg=any(b<=current<=t for b,t in active_bear)
+        nearest_bull=(min(active_bull,key=lambda x:abs((x[0]+x[1])/2-current)) if active_bull else None)
+        nearest_bear=(min(active_bear,key=lambda x:abs((x[0]+x[1])/2-current)) if active_bear else None)
         if in_bullish_fvg: logger.info("[FVG] ★ 강세 FVG 내부 — 기관 매수 주문 구간 (롱 유리)")
         if in_bearish_fvg: logger.info("[FVG] ★ 약세 FVG 내부 — 기관 매도 주문 구간 (숏 유리)")
-
-        return {
-            "in_bullish_fvg":      in_bullish_fvg,
-            "in_bearish_fvg":      in_bearish_fvg,
-            "bullish_fvg_count":   len(active_bull),
-            "bearish_fvg_count":   len(active_bear),
-            "nearest_bullish_fvg": (round(nearest_bull[0],4), round(nearest_bull[1],4)) if nearest_bull else None,
-            "nearest_bearish_fvg": (round(nearest_bear[0],4), round(nearest_bear[1],4)) if nearest_bear else None,
-        }
+        return {"in_bullish_fvg":in_bullish_fvg,"in_bearish_fvg":in_bearish_fvg,
+                "bullish_fvg_count":len(active_bull),"bearish_fvg_count":len(active_bear),
+                "nearest_bullish_fvg":(round(nearest_bull[0],4),round(nearest_bull[1],4)) if nearest_bull else None,
+                "nearest_bearish_fvg":(round(nearest_bear[0],4),round(nearest_bear[1],4)) if nearest_bear else None}
     except Exception as e:
-        logger.warning(f"[FVG] 오류: {e}")
-        return _empty
+        logger.warning(f"[FVG] 오류: {e}"); return _empty
 
-
-# ══════════════════════════════════════════════
-# [신규] BOS / CHoCH 감지
-# ══════════════════════════════════════════════
 
 def detect_bos_choch(df: pd.DataFrame, lookback: int = 60, n: int = 3) -> dict:
-    """
-    BOS  (Break of Structure): 기존 추세 지속 확증
-    CHoCH (Change of Character): 추세 전환 최초 경고
-
-    상승 추세 기준:
-    - BOS 상승:   현재 종가 > 최근 스윙 고점 → 추세 지속
-    - CHoCH 하락: Higher High 구조에서 내부 저점 이탈 → 추세 전환 경고
-
-    하락 추세 기준:
-    - BOS 하락:   현재 종가 < 최근 스윙 저점 → 추세 지속
-    - CHoCH 상승: Lower Low 구조에서 내부 고점 돌파 → 추세 전환 경고
-
-    주의: BOS와 CHoCH는 상호 배타적 (BOS 우선)
-    """
-    _empty = {
-        "bos_bullish":False,"bos_bearish":False,
-        "choch_bullish":False,"choch_bearish":False,
-        "last_swing_high":None,"last_swing_low":None,
-    }
-    if df is None or len(df) < max(20, n*4): return _empty
+    _empty={"bos_bullish":False,"bos_bearish":False,"choch_bullish":False,"choch_bearish":False,
+            "last_swing_high":None,"last_swing_low":None}
+    if df is None or len(df)<max(20,n*4): return _empty
     try:
-        lb     = min(lookback, len(df) - 1)
-        highs  = df["high"].astype(float).values[-lb:]
-        lows   = df["low"].astype(float).values[-lb:]
-        closes = df["close"].astype(float).values[-lb:]
-
-        # 스윙 포인트 탐색 (n개 좌우 캔들 기준, 마지막 n개 제외)
-        s_highs, s_lows = [], []
-        for i in range(n, lb - n - 1):
-            window_h = highs[max(0,i-n):i+n+1]
-            window_l = lows[max(0,i-n):i+n+1]
-            if len(window_h) == 2*n+1:
-                if highs[i] == max(window_h): s_highs.append((i, highs[i]))
-                if lows[i]  == min(window_l): s_lows.append((i, lows[i]))
-
-        current_close = closes[-1]
-        bos_bullish = bos_bearish = choch_bullish = choch_bearish = False
-
-        last_sh = s_highs[-1][1] if s_highs else None
-        last_sl = s_lows[-1][1]  if s_lows  else None
-
-        # BOS: 현재 종가가 최근 스윙 포인트 돌파
-        if last_sh and current_close > last_sh: bos_bullish = True
-        if last_sl and current_close < last_sl: bos_bearish = True
-
-        # CHoCH 하락전환: Higher High 구조에서 중간 저점 이탈
-        if not bos_bearish and len(s_highs) >= 2 and len(s_lows) >= 1:
-            sh1, sh2 = s_highs[-2], s_highs[-1]
-            if sh2[1] > sh1[1]:  # Higher High 구조 확인
-                interim_lows = [sl for sl in s_lows if sh1[0] < sl[0] < sh2[0]]
-                if interim_lows:
-                    interim_low_val = min(sl[1] for sl in interim_lows)
-                    if current_close < interim_low_val:
-                        choch_bearish = True
-
-        # CHoCH 상승전환: Lower Low 구조에서 중간 고점 돌파
-        if not bos_bullish and len(s_lows) >= 2 and len(s_highs) >= 1:
-            sl1, sl2 = s_lows[-2], s_lows[-1]
-            if sl2[1] < sl1[1]:  # Lower Low 구조 확인
-                interim_highs = [sh for sh in s_highs if sl1[0] < sh[0] < sl2[0]]
-                if interim_highs:
-                    interim_high_val = max(sh[1] for sh in interim_highs)
-                    if current_close > interim_high_val:
-                        choch_bullish = True
-
+        lb=min(lookback,len(df)-1); highs=df["high"].astype(float).values[-lb:]
+        lows=df["low"].astype(float).values[-lb:]; closes=df["close"].astype(float).values[-lb:]
+        s_highs=[]; s_lows=[]
+        for i in range(n,lb-n-1):
+            wh=highs[max(0,i-n):i+n+1]; wl=lows[max(0,i-n):i+n+1]
+            if len(wh)==2*n+1:
+                if highs[i]==max(wh): s_highs.append((i,highs[i]))
+                if lows[i] ==min(wl): s_lows.append((i,lows[i]))
+        current_close=closes[-1]
+        bos_bullish=bos_bearish=choch_bullish=choch_bearish=False
+        last_sh=s_highs[-1][1] if s_highs else None
+        last_sl=s_lows[-1][1]  if s_lows  else None
+        if last_sh and current_close>last_sh: bos_bullish=True
+        if last_sl and current_close<last_sl: bos_bearish=True
+        if not bos_bearish and len(s_highs)>=2 and len(s_lows)>=1:
+            sh1,sh2=s_highs[-2],s_highs[-1]
+            if sh2[1]>sh1[1]:
+                il=[sl for sl in s_lows if sh1[0]<sl[0]<sh2[0]]
+                if il and current_close<min(sl[1] for sl in il): choch_bearish=True
+        if not bos_bullish and len(s_lows)>=2 and len(s_highs)>=1:
+            sl1,sl2=s_lows[-2],s_lows[-1]
+            if sl2[1]<sl1[1]:
+                ih=[sh for sh in s_highs if sl1[0]<sh[0]<sl2[0]]
+                if ih and current_close>max(sh[1] for sh in ih): choch_bullish=True
         if bos_bullish:   logger.info("[BOS] ★ 상승 BOS — 상승 추세 지속 확증")
         if bos_bearish:   logger.info("[BOS] ★ 하락 BOS — 하락 추세 지속 확증")
         if choch_bullish: logger.info("[CHoCH] ⚠️ 상승전환 경고 — 하락→상승 전환 신호")
         if choch_bearish: logger.info("[CHoCH] ⚠️ 하락전환 경고 — 상승→하락 전환 신호")
-
-        return {
-            "bos_bullish":    bos_bullish,
-            "bos_bearish":    bos_bearish,
-            "choch_bullish":  choch_bullish,
-            "choch_bearish":  choch_bearish,
-            "last_swing_high": round(last_sh, 4) if last_sh else None,
-            "last_swing_low":  round(last_sl, 4) if last_sl else None,
-        }
+        return {"bos_bullish":bos_bullish,"bos_bearish":bos_bearish,
+                "choch_bullish":choch_bullish,"choch_bearish":choch_bearish,
+                "last_swing_high":round(last_sh,4) if last_sh else None,
+                "last_swing_low": round(last_sl,4) if last_sl else None}
     except Exception as e:
-        logger.warning(f"[BOS/CHoCH] 오류: {e}")
-        return _empty
+        logger.warning(f"[BOS/CHoCH] 오류: {e}"); return _empty
 
-
-# ══════════════════════════════════════════════
-# [신규] 피보나치 레벨 분석
-# ══════════════════════════════════════════════
 
 def check_fibonacci_levels(df: pd.DataFrame) -> dict:
-    """
-    피보나치 되돌림 레벨 분석 (롱/숏 대칭)
-
-    롱 황금포켓: 최근 스윙 고점 → 현재 가격이 61.8~65% 되돌림 구간
-                 = 상승 추세 중 가장 강력한 눌림목 반등 구간
-    숏 황금포켓: 최근 스윙 저점 → 현재 가격이 61.8~65% 반등 구간
-                 = 하락 추세 중 가장 강력한 반등 후 재진입 구간
-
-    주요 레벨 (±1.5% 허용): 38.2%, 50%, 78.6%
-    최소 스윙 크기 3% 이하: 노이즈로 간주, 미적용
-    """
-    _empty = {
-        "in_golden_pocket_long":False, "near_key_level_long":False, "long_retracement":None,
-        "in_golden_pocket_short":False,"near_key_level_short":False,"short_retracement":None,
-        "swing_high":None,"swing_low":None,
-    }
-    if df is None or len(df) < config.FIB_LOOKBACK // 2: return _empty
+    _empty={"in_golden_pocket_long":False,"near_key_level_long":False,"long_retracement":None,
+            "in_golden_pocket_short":False,"near_key_level_short":False,"short_retracement":None,
+            "swing_high":None,"swing_low":None}
+    if df is None or len(df)<config.FIB_LOOKBACK//2: return _empty
     try:
-        lb     = min(config.FIB_LOOKBACK, len(df))
-        closes = df["close"].astype(float).values[-lb:]
-        highs  = df["high"].astype(float).values[-lb:]
-        lows   = df["low"].astype(float).values[-lb:]
-        current = closes[-1]
-
-        # 전체 스윙 고점/저점 (마지막 5캔들 제외 — 편향 방지)
-        end = lb - 5
-        sh_idx = int(np.argmax(highs[:end]))
-        sl_idx = int(np.argmin(lows[:end]))
-        swing_high = highs[sh_idx]
-        swing_low  = lows[sl_idx]
-
-        # 롱 피보: 고점 이전 저점을 기준으로 되돌림 계산
-        swing_low_for_long  = min(lows[:sh_idx + 1]) if sh_idx > 0 else swing_low
-        long_range = swing_high - swing_low_for_long
-
-        # 숏 피보: 저점 이전 고점을 기준으로 반등 계산
-        swing_high_for_short = max(highs[:sl_idx + 1]) if sl_idx > 0 else swing_high
-        short_range = swing_high_for_short - swing_low
-
-        # 최소 스윙 크기 필터 (3% 미만 = 노이즈)
-        long_retr  = None
-        short_retr = None
-
-        if long_range / swing_high >= config.FIB_MIN_SWING_PCT and current < swing_high:
-            long_retr = (swing_high - current) / long_range
-
-        if short_range / swing_high_for_short >= config.FIB_MIN_SWING_PCT and current > swing_low:
-            short_retr = (current - swing_low) / short_range
-
-        TOL = config.FIB_TOLERANCE
-
-        def _in_golden(r):
-            return r is not None and 0.618 <= r <= 0.650
-
-        def _near_key(r):
-            return r is not None and any(abs(r - lvl) <= TOL for lvl in [0.382, 0.500, 0.786])
-
-        in_gp_long  = _in_golden(long_retr)
-        in_gp_short = _in_golden(short_retr)
-        near_l = _near_key(long_retr)  and not in_gp_long
-        near_s = _near_key(short_retr) and not in_gp_short
-
-        if in_gp_long:  logger.info(f"[피보] ★ 롱 황금포켓 {long_retr*100:.1f}% (61.8~65%)")
-        elif near_l:    logger.info(f"[피보] 롱 주요레벨 근접 {long_retr*100:.1f}%")
-        if in_gp_short: logger.info(f"[피보] ★ 숏 황금포켓 {short_retr*100:.1f}% (61.8~65%)")
-        elif near_s:    logger.info(f"[피보] 숏 주요레벨 근접 {short_retr*100:.1f}%")
-
-        return {
-            "in_golden_pocket_long":  in_gp_long,
-            "near_key_level_long":    near_l,
-            "long_retracement":       round(long_retr * 100, 1) if long_retr else None,
-            "in_golden_pocket_short": in_gp_short,
-            "near_key_level_short":   near_s,
-            "short_retracement":      round(short_retr * 100, 1) if short_retr else None,
-            "swing_high":             round(swing_high, 4),
-            "swing_low":              round(swing_low, 4),
-        }
+        lb=min(config.FIB_LOOKBACK,len(df)); closes=df["close"].astype(float).values[-lb:]
+        highs=df["high"].astype(float).values[-lb:]; lows=df["low"].astype(float).values[-lb:]
+        current=closes[-1]; end=lb-5
+        sh_idx=int(np.argmax(highs[:end])); sl_idx=int(np.argmin(lows[:end]))
+        swing_high=highs[sh_idx]; swing_low=lows[sl_idx]
+        swing_low_for_long  = min(lows[:sh_idx+1])  if sh_idx>0 else swing_low
+        swing_high_for_short= max(highs[:sl_idx+1]) if sl_idx>0 else swing_high
+        long_range=swing_high-swing_low_for_long; short_range=swing_high_for_short-swing_low
+        long_retr=short_retr=None
+        if long_range/swing_high>=config.FIB_MIN_SWING_PCT and current<swing_high:
+            long_retr=(swing_high-current)/long_range
+        if short_range/swing_high_for_short>=config.FIB_MIN_SWING_PCT and current>swing_low:
+            short_retr=(current-swing_low)/short_range
+        TOL=config.FIB_TOLERANCE
+        def _gp(r): return r is not None and 0.618<=r<=0.650
+        def _kl(r): return r is not None and any(abs(r-l)<=TOL for l in [0.382,0.500,0.786])
+        in_gp_long=_gp(long_retr); in_gp_short=_gp(short_retr)
+        near_l=_kl(long_retr) and not in_gp_long; near_s=_kl(short_retr) and not in_gp_short
+        if in_gp_long:  logger.info(f"[피보] ★ 롱 황금포켓 {long_retr*100:.1f}%")
+        elif near_l:    logger.info(f"[피보] 롱 주요레벨 {long_retr*100:.1f}%")
+        if in_gp_short: logger.info(f"[피보] ★ 숏 황금포켓 {short_retr*100:.1f}%")
+        elif near_s:    logger.info(f"[피보] 숏 주요레벨 {short_retr*100:.1f}%")
+        return {"in_golden_pocket_long":in_gp_long,"near_key_level_long":near_l,
+                "long_retracement":round(long_retr*100,1) if long_retr else None,
+                "in_golden_pocket_short":in_gp_short,"near_key_level_short":near_s,
+                "short_retracement":round(short_retr*100,1) if short_retr else None,
+                "swing_high":round(swing_high,4),"swing_low":round(swing_low,4)}
     except Exception as e:
-        logger.warning(f"[피보나치] 오류: {e}")
-        return _empty
+        logger.warning(f"[피보나치] 오류: {e}"); return _empty
 
 
 # ══════════════════════════════════════════════
-# 트레이더 업그레이드 — 기존 캔들/구조/거래량다이버
+# 캔들 / 시장구조 / 거래량다이버전스
 # ══════════════════════════════════════════════
 
 def analyze_candle_pattern(df: pd.DataFrame) -> dict:
-    _empty = {"long_score":50,"short_score":50,"patterns":[],
-              "bearish_pin":False,"bullish_pin":False,
-              "bearish_engulf":False,"bullish_engulf":False,
-              "consecutive_bear":False,"consecutive_bull":False}
-    if df is None or len(df) < 4: return _empty
+    _empty={"long_score":50,"short_score":50,"patterns":[],
+            "bearish_pin":False,"bullish_pin":False,"bearish_engulf":False,"bullish_engulf":False,
+            "consecutive_bear":False,"consecutive_bull":False}
+    if df is None or len(df)<4: return _empty
     try:
         c=df["close"].astype(float).values; o=df["open"].astype(float).values
         h=df["high"].astype(float).values;  l=df["low"].astype(float).values
@@ -863,11 +731,11 @@ def analyze_candle_pattern(df: pd.DataFrame) -> dict:
         consecutive_bull=all(c[-i]>o[-i] for i in range(1,4))
         doji=body[-1]<cur_rng*0.10 if cur_rng>0 else False
         patterns=[]; short_score,long_score=50,50
-        if bearish_pin:   short_score+=20; patterns.append("베어리시핀바")
-        if bearish_engulf:short_score+=18; patterns.append("베어리시인걸핑")
+        if bearish_pin:    short_score+=20; patterns.append("베어리시핀바")
+        if bearish_engulf: short_score+=18; patterns.append("베어리시인걸핑")
         if consecutive_bear and not bearish_pin: short_score+=8; patterns.append("연속음봉3")
-        if bullish_pin:   long_score+=20; patterns.append("불리시핀바")
-        if bullish_engulf:long_score+=18; patterns.append("불리시인걸핑")
+        if bullish_pin:    long_score+=20; patterns.append("불리시핀바")
+        if bullish_engulf: long_score+=18; patterns.append("불리시인걸핑")
         if consecutive_bull and not bullish_pin: long_score+=8; patterns.append("연속양봉3")
         if doji: short_score*=0.85; long_score*=0.85; patterns.append("도지(방향약화)")
         if patterns: logger.info(f"[캔들패턴] {patterns}")
@@ -876,30 +744,23 @@ def analyze_candle_pattern(df: pd.DataFrame) -> dict:
                 "bearish_engulf":bearish_engulf,"bullish_engulf":bullish_engulf,
                 "consecutive_bear":consecutive_bear,"consecutive_bull":consecutive_bull}
     except Exception as e:
-        logger.warning(f"[캔들패턴] 오류: {e}")
-        return _empty
+        logger.warning(f"[캔들패턴] 오류: {e}"); return _empty
 
 
 def analyze_market_structure(df: pd.DataFrame) -> dict:
-    """
-    시장 구조 분석 — Higher Low / Lower High / 돌파 실패
-    [조정] 스윙 임계값: 0.2% → 0.5% (크립토 노이즈 차단)
-    """
-    _empty = {"long_score":50,"short_score":50,
-              "lower_high":False,"higher_low":False,
-              "failed_breakout":False,"failed_breakdown":False}
-    if df is None or len(df) < 30: return _empty
+    _empty={"long_score":50,"short_score":50,"lower_high":False,"higher_low":False,
+            "failed_breakout":False,"failed_breakdown":False}
+    if df is None or len(df)<30: return _empty
     try:
         highs=df["high"].astype(float).values; lows=df["low"].astype(float).values; closes=df["close"].astype(float).values
-        swing_highs,swing_lows=[],[]
+        swing_highs=[]; swing_lows=[]
         for i in range(3,len(highs)-3):
             if highs[i]==max(highs[i-3:i+4]): swing_highs.append(highs[i])
             if lows[i] ==min(lows[i-3:i+4]):  swing_lows.append(lows[i])
-        lower_high=False; higher_low=False; failed_breakout=False; failed_breakdown=False
-        # [조정] 0.2% → 0.5% 임계값
-        THRESH = config.MARKET_STRUCT_SWING_THRESHOLD  # 0.005
-        if len(swing_highs)>=2: lower_high = swing_highs[-1] < swing_highs[-2] * (1 - THRESH)
-        if len(swing_lows) >=2: higher_low = swing_lows[-1]  > swing_lows[-2]  * (1 + THRESH)
+        lower_high=higher_low=failed_breakout=failed_breakdown=False
+        THRESH=config.MARKET_STRUCT_SWING_THRESHOLD
+        if len(swing_highs)>=2: lower_high=swing_highs[-1]<swing_highs[-2]*(1-THRESH)
+        if len(swing_lows) >=2: higher_low=swing_lows[-1] >swing_lows[-2] *(1+THRESH)
         lookback=20
         recent_high=max(highs[-lookback:-3]); max_last5=max(highs[-6:-1]); current=closes[-1]
         if max_last5>=recent_high*0.99 and current<recent_high*0.98: failed_breakout=True
@@ -907,52 +768,37 @@ def analyze_market_structure(df: pd.DataFrame) -> dict:
         if min_last5<=recent_low*1.01 and current>recent_low*1.02: failed_breakdown=True
         short_score=50+(10 if lower_high else 0)+(16 if failed_breakout else 0)
         long_score =50+(10 if higher_low else 0)+(16 if failed_breakdown else 0)
-        sigs=[]
-        if lower_high:       sigs.append("LowerHigh")
-        if higher_low:       sigs.append("HigherLow")
-        if failed_breakout:  sigs.append("돌파실패")
-        if failed_breakdown: sigs.append("붕괴실패")
+        sigs=[s for s,v in [("LowerHigh",lower_high),("HigherLow",higher_low),("돌파실패",failed_breakout),("붕괴실패",failed_breakdown)] if v]
         if sigs: logger.info(f"[시장구조] {sigs}")
         return {"long_score":round(min(100,max(0,long_score)),2),"short_score":round(min(100,max(0,short_score)),2),
                 "lower_high":lower_high,"higher_low":higher_low,
                 "failed_breakout":failed_breakout,"failed_breakdown":failed_breakdown}
     except Exception as e:
-        logger.warning(f"[시장구조] 오류: {e}")
-        return _empty
+        logger.warning(f"[시장구조] 오류: {e}"); return _empty
 
 
 def analyze_vol_price_divergence(df: pd.DataFrame) -> dict:
-    """
-    거래량-가격 다이버전스
-    [조정] 임계값 강화: 0.3%+30% → 0.5%+50% (오탐 감소)
-    """
-    _empty = {"long_score":50,"short_score":50,"bearish_vol_div":False,"bullish_vol_div":False}
+    _empty={"long_score":50,"short_score":50,"bearish_vol_div":False,"bullish_vol_div":False}
     if df is None or len(df)<20: return _empty
     try:
         closes=df["close"].astype(float).values[-20:]; volumes=df["volume"].astype(float).values[-20:]; half=10
-        prev_c,curr_c=closes[:half],closes[half:]
-        prev_v,curr_v=volumes[:half],volumes[half:]
+        prev_c,curr_c=closes[:half],closes[half:]; prev_v,curr_v=volumes[:half],volumes[half:]
         p_hi=int(np.argmax(prev_c)); c_hi=int(np.argmax(curr_c))
         p_lo=int(np.argmin(prev_c)); c_lo=int(np.argmin(curr_c))
-        # [조정] 0.5% + 50%
-        P_THRESH = 1 + config.VOL_DIV_PRICE_THRESHOLD   # 1.005
-        V_BULL   = config.VOL_DIV_BULL_VOLUME_RATIO      # 1.50
-        V_BEAR   = config.VOL_DIV_BEAR_VOLUME_RATIO      # 0.67
+        P_THRESH=1+config.VOL_DIV_PRICE_THRESHOLD; V_BULL=config.VOL_DIV_BULL_VOLUME_RATIO; V_BEAR=config.VOL_DIV_BEAR_VOLUME_RATIO
         bearish_vol_div=(curr_c[c_hi]>prev_c[p_hi]*P_THRESH and curr_v[c_hi]<prev_v[p_hi]*V_BEAR)
         bullish_vol_div=(curr_c[c_lo]<prev_c[p_lo]*(2-P_THRESH) and curr_v[c_lo]>prev_v[p_lo]*V_BULL)
-        short_score=50+(18 if bearish_vol_div else 0)
-        long_score =50+(18 if bullish_vol_div else 0)
-        if bearish_vol_div: logger.info("[거래량다이버] ★ 신고가+거래량감소(0.5%+50%) — 숏 신호")
-        if bullish_vol_div: logger.info("[거래량다이버] ★ 신저가+거래량증가(0.5%+50%) — 롱 신호")
+        short_score=50+(18 if bearish_vol_div else 0); long_score=50+(18 if bullish_vol_div else 0)
+        if bearish_vol_div: logger.info("[거래량다이버] ★ 신고가+거래량감소 — 숏 신호")
+        if bullish_vol_div: logger.info("[거래량다이버] ★ 신저가+거래량증가 — 롱 신호")
         return {"long_score":round(min(100,max(0,long_score)),2),"short_score":round(min(100,max(0,short_score)),2),
                 "bearish_vol_div":bearish_vol_div,"bullish_vol_div":bullish_vol_div}
     except Exception as e:
-        logger.warning(f"[거래량다이버] 오류: {e}")
-        return _empty
+        logger.warning(f"[거래량다이버] 오류: {e}"); return _empty
 
 
 # ══════════════════════════════════════════════
-# 10. 전체 분석 통합
+# 10. 전체 분석 통합  [Fix Issue 1 반영]
 # ══════════════════════════════════════════════
 
 def run_full_analysis(symbol: str, collected_data: dict) -> dict:
@@ -972,8 +818,12 @@ def run_full_analysis(symbol: str, collected_data: dict) -> dict:
     adx_15m = calculate_adx(df_15m)
     adx_1h  = calculate_adx(df_1h)
     funding = analyze_funding_rate(funding_data)
+
+    # 국면 확정을 EMA 계산 전에 수행 (Fix Issue 1: regime 파라미터 전달 위해)
     regime  = classify_market_regime(df_15m, adx_15m, bb)
-    ls_ratio= analyze_long_short_ratio(ls_raw, regime.get("regime","RANGING"))
+    regime_name = regime.get("regime", "UNKNOWN")
+
+    ls_ratio= analyze_long_short_ratio(ls_raw, regime_name)
     oi      = analyze_oi_change(oi_raw, df_15m)
     taker   = analyze_taker_volume(taker_raw)
     liq     = analyze_liquidations(liq_raw, df_15m)
@@ -984,58 +834,54 @@ def run_full_analysis(symbol: str, collected_data: dict) -> dict:
     market_struct  = analyze_market_structure(df_15m)
     vol_price_div  = analyze_vol_price_divergence(df_15m)
 
-    # ── [신규] SMC / 피보나치 분석 ──────────────────────────────
-    fvg        = detect_fvg(df_15m)
-    bos_choch  = detect_bos_choch(df_15m)
-    fibonacci  = check_fibonacci_levels(df_15m)
+    fvg       = detect_fvg(df_15m)
+    bos_choch = detect_bos_choch(df_15m)
+    fibonacci = check_fibonacci_levels(df_15m)
 
-    ema_long  = calculate_ema_multiplier(ohlcv, "long")
-    ema_short = calculate_ema_multiplier(ohlcv, "short")
-    gate_long = evaluate_gates("long",  funding, ls_ratio)
-    gate_short= evaluate_gates("short", funding, ls_ratio)
+    # [Fix Issue 1] regime_name 전달 → 로그 배율과 실제 적용 배율 일치
+    ema_long  = calculate_ema_multiplier(ohlcv, "long",  regime_name)
+    ema_short = calculate_ema_multiplier(ohlcv, "short", regime_name)
+
+    gate_long  = evaluate_gates("long",  funding, ls_ratio)
+    gate_short = evaluate_gates("short", funding, ls_ratio)
 
     logger.info(
         f"  MTF-RSI: 15m:{rsi['value']:.1f} 1h:{rsi.get('value_1h') or '-'} "
         f"4h:{rsi.get('value_4h') or '-'} [{rsi['state']}] | "
         f"BB:{bb['state']}(%B={bb['pct_b']:.2f}) | "
         f"ADX:{adx_15m['adx']:.1f}[{adx_15m['strength']}] | "
-        f"국면:{regime['regime']} | Taker:{taker.get('bias','?')} | "
+        f"국면:{regime_name} | Taker:{taker.get('bias','?')} | "
         f"청산:{liq.get('signal','none')}"
     )
     if bos_choch.get("bos_bullish") or bos_choch.get("bos_bearish"):
         logger.info(f"  BOS: 상승={bos_choch['bos_bullish']} 하락={bos_choch['bos_bearish']}")
-    if bos_choch.get("choch_bullish") or bos_choch.get("choch_bearish"):
-        logger.info(f"  CHoCH: 상승전환={bos_choch['choch_bullish']} 하락전환={bos_choch['choch_bearish']}")
     if fvg.get("in_bullish_fvg") or fvg.get("in_bearish_fvg"):
         logger.info(f"  FVG: 강세={fvg['in_bullish_fvg']} 약세={fvg['in_bearish_fvg']}")
-    if fibonacci.get("in_golden_pocket_long") or fibonacci.get("in_golden_pocket_short"):
-        logger.info(f"  피보: 롱황금포켓={fibonacci['in_golden_pocket_long']} 숏황금포켓={fibonacci['in_golden_pocket_short']}")
 
     return {
-        "symbol":         symbol,
-        "current_price":  ticker.get("last"),
-        "rsi":            rsi,
-        "bollinger":      bb,
-        "ema_long":       ema_long,
-        "ema_short":      ema_short,
-        "adx_15m":        adx_15m,
-        "adx_1h":         adx_1h,
-        "funding_rate":   funding,
-        "ls_ratio":       ls_ratio,
-        "oi_change":      oi,
-        "taker_volume":   taker,
-        "liquidations":   liq,
-        "volume":         vol,
-        "atr":            atr,
-        "regime":         regime,
-        "gate_long":      gate_long,
-        "gate_short":     gate_short,
-        "candle_pattern": candle_pattern,
+        "symbol":           symbol,
+        "current_price":    ticker.get("last"),
+        "rsi":              rsi,
+        "bollinger":        bb,
+        "ema_long":         ema_long,
+        "ema_short":        ema_short,
+        "adx_15m":          adx_15m,
+        "adx_1h":           adx_1h,
+        "funding_rate":     funding,
+        "ls_ratio":         ls_ratio,
+        "oi_change":        oi,
+        "taker_volume":     taker,
+        "liquidations":     liq,
+        "volume":           vol,
+        "atr":              atr,
+        "regime":           regime,
+        "gate_long":        gate_long,
+        "gate_short":       gate_short,
+        "candle_pattern":   candle_pattern,
         "market_structure": market_struct,
-        "vol_price_div":  vol_price_div,
-        # 신규
-        "fvg":            fvg,
-        "bos_choch":      bos_choch,
-        "fibonacci":      fibonacci,
-        "analyzed_at":    datetime.datetime.utcnow().isoformat() + "Z",
+        "vol_price_div":    vol_price_div,
+        "fvg":              fvg,
+        "bos_choch":        bos_choch,
+        "fibonacci":        fibonacci,
+        "analyzed_at":      datetime.datetime.utcnow().isoformat() + "Z",
     }
