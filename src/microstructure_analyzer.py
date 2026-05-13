@@ -1,5 +1,5 @@
 """
-microstructure_analyzer_v2.py  (v2.1 — 이슈 수정 버전)
+microstructure_analyzer.py  (v2.1 — 최종 버전)
 ──────────────────────────────────────────────────────────────────────────────
 v2 → v2.1 변경:
   [Fix Issue 6] direction 대소문자 정규화
