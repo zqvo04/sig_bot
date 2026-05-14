@@ -5,10 +5,10 @@ data_pipeline.py — OKX 선물 데이터 수집 파이프라인
 CCXT는 fetch_ohlcv / fetch_ticker / fetch_funding_rate 등 표준 메서드만 사용.
 
 수정 이력:
-  - collect_ls_ratio:    /public/data/long-short-ratio로 변경 (Rubik API 제거)
+  - collect_ls_ratio:    /public/account-ratio로 변경 (공개 계정비율 API)
   - collect_taker_volume: instType 파라미터 제거, _okx_get 사용, instId → -SWAP suffix
   - collect_funding_rate: BTC/USDT:USDT swap 형식 명시
-  - collect_oi_change:   /rubik/stat/contracts/open-interest-history로 수정
+  - collect_oi_change:   bar 파라미터로 변경 (period 제거), ccy/ctType/ty 추가
   - collect_all_data:    SINGLE_SYMBOL → flat dict 반환 (main.py 호환)
 ──────────────────────────────────────────────────────────────────────
 """
@@ -97,6 +97,11 @@ def _to_uly(symbol: str) -> str:
     return _to_base_id(symbol)
 
 
+def _to_ccy(symbol: str) -> str:
+    """BTC/USDT → BTC (통화 코드)"""
+    return symbol.split("/")[0]
+
+
 def _ohlcv_to_df(ohlcv_list: list) -> pd.DataFrame:
     if not ohlcv_list:
         return pd.DataFrame()
@@ -160,42 +165,41 @@ def collect_funding_rate(exchange: ccxt.okx, symbol: str) -> Optional[dict]:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 3. 롱숏 비율 (포지션 수 기준)
+# 3. 롱숏 비율 (계정 기준)
 # ════════════════════════════════════════════════════════════════════
 
 def collect_ls_ratio(exchange: ccxt.okx, symbol: str) -> dict:
     """
-    OKX: GET /api/v5/public/data/long-short-ratio
-    업데이트된 공개 데이터 엔드포인트 사용
+    OKX: GET /api/v5/public/account-ratio
+    공개 계정 롱숏 비율 (계정 수 기준)
     """
     empty = {"available": False, "long_pct": 0.5, "short_pct": 0.5}
     try:
-        # 업데이트된 엔드포인트: /public/data/long-short-ratio
-        resp = _okx_get("/public/data/long-short-ratio", {
+        # 올바른 엔드포인트: /public/account-ratio
+        resp = _okx_get("/public/account-ratio", {
             "instId": _to_swap_id(symbol),
-            "period": "8H",  # 8H, 4H, 1H, 30m, 15m, 5m, 1m
+            "period": "1H",  # 5m, 15m, 30m, 1H, 2H, 4H, 6H, 12H, 1D
         })
         
         if resp.get("code") != "0" or not resp.get("data"):
             logger.warning(f"  ⚠️  {symbol} 롱숏비율 응답 오류: {resp.get('msg', 'unknown')}")
             return empty
 
-        # 최신 데이터: ratio = longSz / (longSz + shortSz)
         data_list = resp.get("data", [])
         if not data_list or len(data_list) == 0:
             logger.warning(f"  ⚠️  {symbol} 롱숏비율: 데이터 없음")
             return empty
         
-        latest = data_list[0]  # 최신순 정렬
-        long_sz = float(latest.get("longSz", 0) or 0)
-        short_sz = float(latest.get("shortSz", 0) or 0)
-        total_sz = long_sz + short_sz
+        # 최신 데이터 (최신순 정렬)
+        latest = data_list[0]
+        ratio = float(latest.get("ratio", 0) or 0)
         
-        if total_sz <= 0:
+        if ratio <= 0:
             return empty
         
-        long_pct = long_sz / total_sz
-        short_pct = short_sz / total_sz
+        # ratio = long_accounts / short_accounts → 비율로 변환
+        long_pct = ratio / (1.0 + ratio)
+        short_pct = 1.0 - long_pct
         
         logger.info(f"  📊 {symbol} 롱숏비율: 롱 {long_pct*100:.1f}%")
         return {
@@ -271,7 +275,8 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
 def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
     """
     OI 변화율 (1시간 전 대비 현재).
-    OKX 공개 API 직접 호출: /api/v5/rubik/stat/contracts/open-interest-history
+    OKX: /api/v5/rubik/stat/contracts/open-interest-history
+    파라미터: ccy (통화), ctType (SWAP), ty (CONTRACTS), bar (시간 간격)
     """
     empty = {"available": False, "change_pct": 0.0, "current_oi": 0.0, "prev_oi": 0.0, 
              "direction": "", "interpretation": ""}
@@ -289,11 +294,13 @@ def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
         if current_oi <= 0:
             return empty
         
-        # 1시간 전 OI 조회 - 수정된 엔드포인트
+        # 1시간 전 OI 조회 - 수정된 파라미터
+        # bar를 period 대신 사용 (5m, 1H, 1D, 1W, 1M)
         resp_hist = _okx_get("/rubik/stat/contracts/open-interest-history", {
-            "instId": _to_swap_id(symbol),
-            "period": "1m",
-            "limit":  "65",  # 1시간 = 약 60분
+            "ccy": _to_ccy(symbol),         # BTC, ETH 등
+            "ctType": "SWAP",               # SWAP 또는 FUTURES
+            "ty": "CONTRACTS",              # CONTRACTS (계약) 또는 COIN (코인)
+            "bar": "1H",                    # bar 파라미터 사용 (5m, 1H, 1D, 1W, 1M)
         })
         
         if resp_hist.get("code") != "0" or not resp_hist.get("data"):
@@ -305,7 +312,7 @@ def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
             logger.warning(f"  ⚠️  {symbol} OI 히스토리 데이터 부족: {len(hist_data)}개")
             return empty
         
-        # 가장 오래된 데이터 = 1시간 전 추정
+        # 가장 오래된 데이터 = 1시간 전 추정 (또는 가장 첫번째)
         prev_oi = float(hist_data[-1].get("oi", 0))
         
         if prev_oi <= 0:
