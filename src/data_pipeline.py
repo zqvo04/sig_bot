@@ -164,52 +164,43 @@ def collect_funding_rate(exchange: ccxt.okx, symbol: str) -> Optional[dict]:
         return None
 
 
-# ════════════════════════════════════════════════════════════════════
-# 3. 롱숏 비율 (계정 기준)
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. 롱숏 비율 수집 (포지션 수 기준)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def collect_ls_ratio(exchange: ccxt.okx, symbol: str) -> dict:
     """
-    OKX: GET /api/v5/public/account-ratio
-    공개 계정 롱숏 비율 (계정 수 기준)
-    """
-    empty = {"available": False, "long_pct": 0.5, "short_pct": 0.5}
-    try:
-        # 올바른 엔드포인트: /public/account-ratio
-        resp = _okx_get("/public/account-ratio", {
-            "instId": _to_swap_id(symbol),
-            "period": "1H",  # 5m, 15m, 30m, 1H, 2H, 4H, 6H, 12H, 1D
-        })
-        
-        if resp.get("code") != "0" or not resp.get("data"):
-            logger.warning(f"  ⚠️  {symbol} 롱숏비율 응답 오류: {resp.get('msg', 'unknown')}")
-            return empty
+    포지션 수 기준 롱숏 비율 (직접, Position-Level)
+    OKX: GET /api/v5/rubik/stat/contracts/long-short-pos-ratio
+         instId: BTC-USDT  (SWAP 없음)
 
-        data_list = resp.get("data", [])
-        if not data_list or len(data_list) == 0:
-            logger.warning(f"  ⚠️  {symbol} 롱숏비율: 데이터 없음")
-            return empty
-        
-        # 최신 데이터 (최신순 정렬)
-        latest = data_list[0]
-        ratio = float(latest.get("ratio", 0) or 0)
-        
-        if ratio <= 0:
-            return empty
-        
-        # ratio = long_accounts / short_accounts → 비율로 변환
-        long_pct = ratio / (1.0 + ratio)
+    반환: long_pct, short_pct (0.0 ~ 1.0)
+    """
+    _empty = {'available': False, 'long_pct': 0.5, 'short_pct': 0.5}
+    try:
+        resp = exchange.publicGetRubikStatContractsLongShortPosRatio({
+            'instId': _to_base_id(symbol),
+            'period': '5m',
+            'limit':  '1',
+        })
+        if not resp.get('data'):
+            return _empty
+
+        # OKX 반환: [[timestamp, longShortPosRatio], ...]
+        # longShortPosRatio = 롱포지션수 / 숏포지션수
+        ls_ratio  = float(resp['data'][0][1])
+        long_pct  = ls_ratio / (1.0 + ls_ratio)
         short_pct = 1.0 - long_pct
-        
-        logger.info(f"  📊 {symbol} 롱숏비율: 롱 {long_pct*100:.1f}%")
+
+        logger.info(f"  📊 {symbol} 롱숏(직접): 롱 {long_pct*100:.1f}%")
         return {
-            "available": True,
-            "long_pct":  round(long_pct,  4),
-            "short_pct": round(short_pct, 4),
+            'available':  True,
+            'long_pct':   round(long_pct,  4),
+            'short_pct':  round(short_pct, 4),
         }
     except Exception as e:
-        logger.warning(f"  ❌ {symbol} 롱숏비율 실패: {e}")
-        return empty
+        logger.warning(f"  ❌ {symbol} 롱숏비율 수집 실패: {e}")
+        return _empty
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -275,7 +266,7 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
 def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
     """
     OI 변화율 (1시간 전 대비 현재).
-    OKX: /api/v5/rubik/stat/contracts/open-interest-history
+    OKX:  GET /api/v5/public/open-interest  (instType=SWAP, instId=BTC-USDT-SWAP)
     파라미터: ccy (통화), ctType (SWAP), ty (CONTRACTS), bar (시간 간격)
     """
     empty = {"available": False, "change_pct": 0.0, "current_oi": 0.0, "prev_oi": 0.0, 
@@ -296,7 +287,7 @@ def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
         
         # 1시간 전 OI 조회 - 수정된 파라미터
         # bar를 period 대신 사용 (5m, 1H, 1D, 1W, 1M)
-        resp_hist = _okx_get("/rubik/stat/contracts/open-interest-history", {
+        resp_hist = _okx_get("GET /api/v5/rubik/stat/contracts/open-interest-history", {
             "ccy": _to_ccy(symbol),         # BTC, ETH 등
             "ctType": "SWAP",               # SWAP 또는 FUTURES
             "ty": "CONTRACTS",              # CONTRACTS (계약) 또는 COIN (코인)
