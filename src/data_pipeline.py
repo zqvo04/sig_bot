@@ -202,7 +202,6 @@ def collect_ls_ratio(exchange: ccxt.okx, symbol: str) -> dict:
         logger.warning(f"  ❌ {symbol} 롱숏비율 수집 실패: {e}")
         return _empty
 
-
 # ════════════════════════════════════════════════════════════════════
 # 4. Taker 비율
 # ════════════════════════════════════════════════════════════════════
@@ -259,75 +258,69 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
         return empty
 
 
-# ════════════════════════════════════════════════════════════════════
-# 5. OI 변화율
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. OI 변화율 수집
+# ══════════════════════════════════════════════════════════════════════════════
 
 def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
     """
-    OI 변화율 (1시간 전 대비 현재).
-    OKX:  GET /api/v5/public/open-interest  (instType=SWAP, instId=BTC-USDT-SWAP)
-    파라미터: ccy (통화), ctType (SWAP), ty (CONTRACTS), bar (시간 간격)
+    미결제약정(OI) 변화율 계산
+    방법: 현재 OI vs 1시간 전(12기간 전) OI 비교
+
+    OKX endpoints:
+      현재 OI : GET /api/v5/public/open-interest  (instType=SWAP, instId=BTC-USDT-SWAP)
+      OI 히스토리: GET /api/v5/rubik/stat/contracts/open-interest-history
     """
-    empty = {"available": False, "change_pct": 0.0, "current_oi": 0.0, "prev_oi": 0.0, 
-             "direction": "", "interpretation": ""}
+    _empty = {
+        'available':  False,
+        'change_pct': 0.0,
+        'current_oi': 0.0,
+        'prev_oi':    0.0,
+    }
     try:
-        # 현재 OI 조회
-        resp_now = _okx_get("/public/open-interest", {
-            "instId": _to_swap_id(symbol),
+        swap_id = _to_swap_id(symbol)
+
+        # 현재 OI (계약 수 또는 코인 기준)
+        resp_cur = exchange.publicGetPublicOpenInterest({
+            'instType': 'SWAP',
+            'instId':   swap_id,
         })
-        
-        if resp_now.get("code") != "0" or not resp_now.get("data"):
-            logger.warning(f"  ⚠️  {symbol} OI 현재값 조회 실패: {resp_now.get('msg', 'unknown')}")
-            return empty
-        
-        current_oi = float(resp_now["data"][0].get("oi", 0))
-        if current_oi <= 0:
-            return empty
-        
-        # 1시간 전 OI 조회 - 수정된 파라미터
-        # bar를 period 대신 사용 (5m, 1H, 1D, 1W, 1M)
-        resp_hist = _okx_get("GET /api/v5/rubik/stat/contracts/open-interest-history", {
-            "ccy": _to_ccy(symbol),         # BTC, ETH 등
-            "ctType": "SWAP",               # SWAP 또는 FUTURES
-            "ty": "CONTRACTS",              # CONTRACTS (계약) 또는 COIN (코인)
-            "bar": "1H",                    # bar 파라미터 사용 (5m, 1H, 1D, 1W, 1M)
+        if not resp_cur.get('data'):
+            return _empty
+
+        # oiCcy: 코인 기준 OI (BTC 등), oi: 계약 수 기준
+        # 일관성을 위해 oi(계약 수) 사용
+        data_cur   = resp_cur['data'][0]
+        current_oi = float(data_cur.get('oi', 0) or data_cur.get('oiCcy', 0))
+
+        # OI 히스토리 (5분봉 12개 = 약 1시간)
+        resp_hist = exchange.publicGetRubikStatContractsOpenInterestHistory({
+            'instType': 'SWAP',
+            'instId':   swap_id,
+            'period':   '5m',
+            'limit':    '13',   # 1개 여유
         })
-        
-        if resp_hist.get("code") != "0" or not resp_hist.get("data"):
-            logger.warning(f"  ⚠️  {symbol} OI 히스토리 조회 실패: {resp_hist.get('msg', 'unknown')}")
-            return empty
-        
-        hist_data = resp_hist.get("data", [])
-        if len(hist_data) < 2:
-            logger.warning(f"  ⚠️  {symbol} OI 히스토리 데이터 부족: {len(hist_data)}개")
-            return empty
-        
-        # 가장 오래된 데이터 = 1시간 전 추정 (또는 가장 첫번째)
-        prev_oi = float(hist_data[-1].get("oi", 0))
-        
+        if not resp_hist.get('data') or len(resp_hist['data']) < 2:
+            return _empty
+
+        # API는 최신→오래된 순 반환
+        # 12기간 전 값 = 마지막 원소
+        prev_oi = float(resp_hist['data'][-1][1])
+
         if prev_oi <= 0:
-            return empty
-        
+            return _empty
+
         change_pct = (current_oi - prev_oi) / prev_oi
-        
-        # 방향성 판단
-        direction = "increasing" if change_pct > 0 else "decreasing"
-        
-        logger.info(f"  📈 {symbol} OI: {prev_oi:.0f} → {current_oi:.0f} ({change_pct*100:+.2f}%) [{direction}]")
-        
+
         return {
-            "available":     True,
-            "change_pct":    round(change_pct, 6),
-            "current_oi":    round(current_oi, 2),
-            "prev_oi":       round(prev_oi,    2),
-            "direction":     direction,
-            "interpretation": "bullish_trend_confirm" if change_pct > 0.02 else 
-                             "bearish_trend_confirm" if change_pct < -0.02 else "neutral",
+            'available':   True,
+            'change_pct':  round(change_pct, 6),
+            'current_oi':  round(current_oi, 2),
+            'prev_oi':     round(prev_oi, 2),
         }
     except Exception as e:
-        logger.warning(f"  ❌ {symbol} OI 실패: {e}")
-        return empty
+        logger.warning(f"  ❌ {symbol} OI 수집 실패: {e}")
+        return _empty
 
 
 # ════════════════════════════════════════════════════════════════════
