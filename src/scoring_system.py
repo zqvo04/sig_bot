@@ -483,7 +483,7 @@ def calculate_entry_score(analysis: dict, direction: str,
             f"[Score/{d.upper()}] [{regime_name}]"
             f" raw:{raw_score:.1f} ×EMA{ema_mult:.2f}"
             + (f" ×페널티{gate_penalty:.2f}" if gate_penalty < 1.0 else "")
-            + f" +보너스{bonus_total}[cap:{bonus_cap}]"
+            f" +보너스{bonus_total}[cap:{bonus_cap}]"
             + micro_note
             + f" = {final_score:.1f}pt (임계:{regime_threshold}pt)"
             + (" 🚨 신호" if signal else "")
