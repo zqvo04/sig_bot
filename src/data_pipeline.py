@@ -168,26 +168,29 @@ def collect_funding_rate(exchange: ccxt.okx, symbol: str) -> Optional[dict]:
 # 3. 롱숏 비율 수집 (포지션 수 기준)
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def collect_ls_ratio(exchange: ccxt.okx, symbol: str) -> dict:
     """
     포지션 수 기준 롱숏 비율 (직접, Position-Level)
     OKX: GET /api/v5/rubik/stat/contracts/long-short-pos-ratio
-         instId: BTC-USDT  (SWAP 없음)
+         instId: BTC-USDT  (SWAP suffix 없음)
 
     반환: long_pct, short_pct (0.0 ~ 1.0)
     """
     _empty = {'available': False, 'long_pct': 0.5, 'short_pct': 0.5}
     try:
-        resp = exchange.publicGetRubikStatContractsLongShortPosRatio({
-            'instId': _to_base_id(symbol),
+        # ✅ 수정: CCXT 메서드 없음 → _okx_get() 직접 호출
+        resp = _okx_get("/rubik/stat/contracts/long-short-pos-ratio", {
+            'instId': _to_base_id(symbol),  # BTC-USDT (SWAP 없음)
             'period': '5m',
             'limit':  '1',
         })
-        if not resp.get('data'):
+
+        if resp.get("code") != "0" or not resp.get("data"):
+            logger.warning(f"  ⚠️  {symbol} 롱숏비율 응답 오류: {resp.get('msg', 'unknown')}")
             return _empty
 
         # OKX 반환: [[timestamp, longShortPosRatio], ...]
-        # longShortPosRatio = 롱포지션수 / 숏포지션수
         ls_ratio  = float(resp['data'][0][1])
         long_pct  = ls_ratio / (1.0 + ls_ratio)
         short_pct = 1.0 - long_pct
@@ -259,6 +262,12 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
         return empty
 
 
+
+        
+        
+            return empty
+        
+
 # ════════════════════════════════════════════════════════════════════
 # 5. OI 변화율
 # ════════════════════════════════════════════════════════════════════
@@ -266,68 +275,64 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
 def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
     """
     OI 변화율 (1시간 전 대비 현재).
-    OKX:  GET /api/v5/public/open-interest  (instType=SWAP, instId=BTC-USDT-SWAP)
-    파라미터: ccy (통화), ctType (SWAP), ty (CONTRACTS), bar (시간 간격)
+    현재 OI:  GET /api/v5/public/open-interest  (instId=BTC-USDT-SWAP)
+    OI 히스토리: GET /api/v5/rubik/stat/contracts/open-interest-history
     """
-    empty = {"available": False, "change_pct": 0.0, "current_oi": 0.0, "prev_oi": 0.0, 
+    empty = {"available": False, "change_pct": 0.0, "current_oi": 0.0, "prev_oi": 0.0,
              "direction": "", "interpretation": ""}
     try:
-        # 현재 OI 조회
+        # 현재 OI
         resp_now = _okx_get("/public/open-interest", {
             "instId": _to_swap_id(symbol),
         })
-        
+
         if resp_now.get("code") != "0" or not resp_now.get("data"):
             logger.warning(f"  ⚠️  {symbol} OI 현재값 조회 실패: {resp_now.get('msg', 'unknown')}")
             return empty
-        
+
         current_oi = float(resp_now["data"][0].get("oi", 0))
         if current_oi <= 0:
             return empty
-        
-        # 1시간 전 OI 조회 - 수정된 파라미터
-        # bar를 period 대신 사용 (5m, 1H, 1D, 1W, 1M)
-        resp_hist = _okx_get("GET /api/v5/rubik/stat/contracts/open-interest-history", {
-            "ccy": _to_ccy(symbol),         # BTC, ETH 등
-            "ctType": "SWAP",               # SWAP 또는 FUTURES
-            "ty": "CONTRACTS",              # CONTRACTS (계약) 또는 COIN (코인)
-            "bar": "1H",                    # bar 파라미터 사용 (5m, 1H, 1D, 1W, 1M)
+
+        # ✅ 수정: "GET /api/v5/..." 제거 → path만 전달
+        resp_hist = _okx_get("/rubik/stat/contracts/open-interest-history", {
+            "ccy":    _to_ccy(symbol),  # BTC, ETH 등
+            "ctType": "SWAP",
+            "ty":     "CONTRACTS",      # COIN 또는 CONTRACTS
+            "bar":    "1H",
         })
-        
+
         if resp_hist.get("code") != "0" or not resp_hist.get("data"):
             logger.warning(f"  ⚠️  {symbol} OI 히스토리 조회 실패: {resp_hist.get('msg', 'unknown')}")
             return empty
-        
+
         hist_data = resp_hist.get("data", [])
         if len(hist_data) < 2:
             logger.warning(f"  ⚠️  {symbol} OI 히스토리 데이터 부족: {len(hist_data)}개")
             return empty
-        
-        # 가장 오래된 데이터 = 1시간 전 추정 (또는 가장 첫번째)
+
         prev_oi = float(hist_data[-1].get("oi", 0))
-        
         if prev_oi <= 0:
             return empty
-        
+
         change_pct = (current_oi - prev_oi) / prev_oi
-        
-        # 방향성 판단
-        direction = "increasing" if change_pct > 0 else "decreasing"
-        
+        direction  = "increasing" if change_pct > 0 else "decreasing"
+
         logger.info(f"  📈 {symbol} OI: {prev_oi:.0f} → {current_oi:.0f} ({change_pct*100:+.2f}%) [{direction}]")
-        
+
         return {
-            "available":     True,
-            "change_pct":    round(change_pct, 6),
-            "current_oi":    round(current_oi, 2),
-            "prev_oi":       round(prev_oi,    2),
-            "direction":     direction,
-            "interpretation": "bullish_trend_confirm" if change_pct > 0.02 else 
-                             "bearish_trend_confirm" if change_pct < -0.02 else "neutral",
+            "available":      True,
+            "change_pct":     round(change_pct, 6),
+            "current_oi":     round(current_oi, 2),
+            "prev_oi":        round(prev_oi,    2),
+            "direction":      direction,
+            "interpretation": "bullish_trend_confirm" if change_pct > 0.02 else
+                              "bearish_trend_confirm" if change_pct < -0.02 else "neutral",
         }
     except Exception as e:
         logger.warning(f"  ❌ {symbol} OI 실패: {e}")
         return empty
+
 
 
 # ════════════════════════════════════════════════════════════════════
