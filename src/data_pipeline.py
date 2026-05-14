@@ -1,15 +1,16 @@
 """
 data_pipeline.py — OKX 선물 데이터 수집 파이프라인
-──────────────────────────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────[...]
 핵심 원칙: OKX 전용 엔드포인트는 CCXT를 거치지 않고 _okx_get() 직접 호출.
 CCXT는 fetch_ohlcv / fetch_ticker / fetch_funding_rate 등 표준 메서드만 사용.
 
 수정 이력:
-  - collect_ls_ratio:    CCXT 없는 메서드 → _okx_get 직접 호출
-  - collect_taker_volume: instType 파라미터 제거, _okx_get 사용
+  - collect_ls_ratio:    CCXT 없는 메서드 → _okx_get 직접 호출, instId → -SWAP suffix
+  - collect_taker_volume: instType 파라미터 제거, _okx_get 사용, instId → -SWAP suffix
   - collect_funding_rate: BTC/USDT:USDT swap 형식 명시
+  - collect_oi_change:   OKX 공개 API 직접 호출로 변경 (CCXT 메서드 제거)
   - collect_all_data:    SINGLE_SYMBOL → flat dict 반환 (main.py 호환)
-──────────────────────────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────[...]
 """
 
 import logging
@@ -32,9 +33,9 @@ logger = logging.getLogger(__name__)
 OKX_BASE = "https://www.okx.com/api/v5"
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # OKX 공개 API 직접 호출 헬퍼
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def _okx_get(path: str, params: dict = None) -> dict:
     """
@@ -48,15 +49,16 @@ def _okx_get(path: str, params: dict = None) -> dict:
             timeout=10,
             headers={"Content-Type": "application/json"},
         )
+        r.raise_for_status()
         return r.json()
     except Exception as e:
         logger.warning(f"[OKX-HTTP] {path} 실패: {e}")
         return {"code": "error", "data": [], "msg": str(e)}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # 거래소 초기화
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def create_exchange() -> ccxt.okx:
     return ccxt.okx({
@@ -68,9 +70,9 @@ def create_exchange() -> ccxt.okx:
     })
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # 심볼 변환 유틸리티
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def _to_ccxt_swap(symbol: str) -> str:
     """BTC/USDT → BTC/USDT:USDT (CCXT swap 형식)"""
@@ -109,9 +111,9 @@ def _ohlcv_to_df(ohlcv_list: list) -> pd.DataFrame:
     return df.dropna(subset=["close"])
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # 1. OHLCV
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def collect_ohlcv(exchange: ccxt.okx, symbol: str) -> Dict[str, pd.DataFrame]:
     swap = _to_ccxt_swap(symbol)
@@ -135,9 +137,9 @@ def collect_ohlcv(exchange: ccxt.okx, symbol: str) -> Dict[str, pd.DataFrame]:
     return result
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # 2. 펀딩비
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def collect_funding_rate(exchange: ccxt.okx, symbol: str) -> Optional[dict]:
     """CCXT fetch_funding_rate — swap 형식 심볼 필수"""
@@ -157,23 +159,26 @@ def collect_funding_rate(exchange: ccxt.okx, symbol: str) -> Optional[dict]:
         return None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # 3. 롱숏 비율 (포지션 수 기준)
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def collect_ls_ratio(exchange: ccxt.okx, symbol: str) -> dict:
     """
     OKX: GET /api/v5/rubik/stat/contracts/long-short-pos-ratio
     CCXT에 이 메서드 없음 → 직접 HTTP 호출
+    선물(SWAP)의 경우 instId는 -SWAP suffix 필수
     """
     empty = {"available": False, "long_pct": 0.5, "short_pct": 0.5}
     try:
         resp = _okx_get("/rubik/stat/contracts/long-short-pos-ratio", {
-            "instId": _to_base_id(symbol),
+            "instId": _to_swap_id(symbol),  # 중요: -SWAP suffix
             "period": "5m",
             "limit":  "1",
         })
-        if not resp.get("data"):
+        
+        if resp.get("code") != "0" or not resp.get("data"):
+            logger.warning(f"  ⚠️  {symbol} 롱숏비율 응답 오류: {resp.get('msg', 'unknown')}")
             return empty
 
         # [[timestamp, longShortPosRatio], ...]
@@ -191,14 +196,14 @@ def collect_ls_ratio(exchange: ccxt.okx, symbol: str) -> dict:
         return empty
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # 4. Taker 비율
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
     """
     OKX: GET /api/v5/rubik/stat/taker-volume-contract
-    파라미터: instId (필수), period, limit — instType 없음
+    파라미터: instId (필수, -SWAP suffix), period, limit
     CCXT publicGetRubikStatTakerVolumeContract가 ccy 파라미터를 강제 추가 → 직접 HTTP 호출
     """
     empty = {
@@ -207,11 +212,13 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
     }
     try:
         resp = _okx_get("/rubik/stat/taker-volume-contract", {
-            "instId": _to_base_id(symbol),
+            "instId": _to_swap_id(symbol),  # 중요: -SWAP suffix
             "period": "5m",
             "limit":  str(min(config.TAKER_LOOKBACK, 100)),
         })
-        if not resp.get("data"):
+        
+        if resp.get("code") != "0" or not resp.get("data"):
+            logger.warning(f"  ⚠️  {symbol} Taker 응답 오류: {resp.get('msg', 'unknown')}")
             return empty
 
         # [[timestamp, buy_vol_usdt, sell_vol_usdt], ...] 최신→오래된
@@ -245,49 +252,75 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
         return empty
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # 5. OI 변화율
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
     """
     OI 변화율 (1시간 전 대비 현재).
-    CCXT fetchOpenInterest / fetchOpenInterestHistory 표준 메서드 사용.
+    OKX 공개 API 직접 호출: /api/v5/public/open-interest
     """
-    empty = {"available": False, "change_pct": 0.0, "current_oi": 0.0, "prev_oi": 0.0}
+    empty = {"available": False, "change_pct": 0.0, "current_oi": 0.0, "prev_oi": 0.0, 
+             "direction": "", "interpretation": ""}
     try:
-        swap = _to_ccxt_swap(symbol)
-        oi_now = exchange.fetch_open_interest(swap)
-        current_oi = float(
-            oi_now.get("openInterestAmount") or oi_now.get("openInterest") or 0
-        )
-        oi_hist = exchange.fetch_open_interest_history(swap, "5m", limit=13)
-        if not oi_hist or len(oi_hist) < 2:
+        # 현재 OI 조회
+        resp_now = _okx_get("/public/open-interest", {
+            "instId": _to_swap_id(symbol),
+        })
+        
+        if resp_now.get("code") != "0" or not resp_now.get("data"):
+            logger.warning(f"  ⚠️  {symbol} OI 현재값 조회 실패: {resp_now.get('msg', 'unknown')}")
             return empty
-
-        oi_hist_sorted = sorted(oi_hist, key=lambda x: x.get("timestamp", 0))
-        prev_oi = float(
-            oi_hist_sorted[0].get("openInterestAmount") or
-            oi_hist_sorted[0].get("openInterest") or 0
-        )
-        if prev_oi <= 0 or current_oi <= 0:
+        
+        current_oi = float(resp_now["data"][0].get("oi", 0))
+        if current_oi <= 0:
             return empty
-
+        
+        # 1시간 전 OI 조회 (openInterestHistory 사용)
+        resp_hist = _okx_get("/public/open-interest-history", {
+            "instId": _to_swap_id(symbol),
+            "period": "1m",
+            "limit":  "65",  # 1시간 = 약 60분
+        })
+        
+        if resp_hist.get("code") != "0" or not resp_hist.get("data"):
+            logger.warning(f"  ⚠️  {symbol} OI 히스토리 조회 실패")
+            return empty
+        
+        if len(resp_hist["data"]) < 2:
+            return empty
+        
+        # 가장 오래된 데이터 = 1시간 전 추정
+        prev_oi = float(resp_hist["data"][-1].get("oi", 0))
+        
+        if prev_oi <= 0:
+            return empty
+        
         change_pct = (current_oi - prev_oi) / prev_oi
+        
+        # 방향성 판단
+        direction = "increasing" if change_pct > 0 else "decreasing"
+        
+        logger.info(f"  📈 {symbol} OI: {prev_oi:.0f} → {current_oi:.0f} ({change_pct*100:+.2f}%) [{direction}]")
+        
         return {
-            "available":  True,
-            "change_pct": round(change_pct, 6),
-            "current_oi": round(current_oi, 2),
-            "prev_oi":    round(prev_oi,    2),
+            "available":     True,
+            "change_pct":    round(change_pct, 6),
+            "current_oi":    round(current_oi, 2),
+            "prev_oi":       round(prev_oi,    2),
+            "direction":     direction,
+            "interpretation": "bullish_trend_confirm" if change_pct > 0.02 else 
+                             "bearish_trend_confirm" if change_pct < -0.02 else "neutral",
         }
     except Exception as e:
         logger.warning(f"  ❌ {symbol} OI 실패: {e}")
         return empty
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # 6. 현재가
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def collect_ticker(exchange: ccxt.okx, symbol: str) -> dict:
     try:
@@ -302,9 +335,9 @@ def collect_ticker(exchange: ccxt.okx, symbol: str) -> dict:
         return {"last": 0.0, "open": 0.0, "change_pct": 0.0, "available": False}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # 단일 심볼 수집
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def collect(exchange: ccxt.okx, symbol: str) -> dict:
     """
@@ -336,9 +369,9 @@ def collect(exchange: ccxt.okx, symbol: str) -> dict:
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # 일괄 수집 (main.py 진입점)
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def collect_all_data(exchange: ccxt.okx, symbols) -> dict:
     """
@@ -364,9 +397,9 @@ def collect_all_data(exchange: ccxt.okx, symbols) -> dict:
     return results
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 # 헬스체크
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════[...]
 
 def check_connection(exchange: ccxt.okx) -> bool:
     try:
