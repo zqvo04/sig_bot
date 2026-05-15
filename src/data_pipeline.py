@@ -5,10 +5,15 @@ data_pipeline.py — OKX 선물 데이터 수집 파이프라인
 CCXT는 fetch_ohlcv / fetch_ticker / fetch_funding_rate 등 표준 메서드만 사용.
 
 수정 이력:
-  - collect_ls_ratio:    _okx_get() 직접 호출로 교체 (CCXT 메서드 미존재)
+  - collect_ls_ratio:    이전 작동 방식 복원
+                         → CCXT fetch_long_short_ratio 시도
+                         → AttributeError 시 publicGetRubikStatContractsLongShortAccountRatio 폴백
+                         → 최종 실패 시 _okx_get("/rubik/stat/contracts/long-short-pos-ratio") 폴백
+  - collect_oi_change:   이전 작동 방식 복원
+                         → swap_exchange.fetch_open_interest_history() 사용
+                         → 실패 시 _okx_get 직접 호출 폴백
   - collect_taker_volume: instType 파라미터 제거, _okx_get 사용, instId → -SWAP suffix
   - collect_funding_rate: BTC/USDT:USDT swap 형식 명시
-  - collect_oi_change:   path 버그 수정 ("GET /api/v5/..." → "/rubik/stat/...")
   - collect_all_data:    SINGLE_SYMBOL → flat dict 반환 (main.py 호환)
 ──────────────────────────────────────────────────────────────────────
 """
@@ -41,6 +46,7 @@ def _okx_get(path: str, params: dict = None) -> dict:
     """
     OKX 공개 REST API 직접 호출.
     CCXT 메서드가 없거나 파라미터 매핑이 틀릴 때 사용.
+    path 예시: "/rubik/stat/contracts/long-short-pos-ratio"
     """
     try:
         r = requests.get(
@@ -165,47 +171,88 @@ def collect_funding_rate(exchange: ccxt.okx, symbol: str) -> Optional[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. 롱숏 비율 수집 (포지션 수 기준)
+# 3. 롱숏 비율 수집
 # ══════════════════════════════════════════════════════════════════════════════
 
 def collect_ls_ratio(exchange: ccxt.okx, symbol: str) -> dict:
     """
-    포지션 수 기준 롱숏 비율 (직접, Position-Level)
-    OKX: GET /api/v5/rubik/stat/contracts/long-short-pos-ratio
-         instId: BTC-USDT  (SWAP suffix 없음)
+    롱숏 비율 수집 — 3단계 폴백 구조 (이전 작동 방식 복원)
 
-    ✅ 수정: CCXT에 publicGetRubikStatContractsLongShortPosRatio 메서드 없음
-             → _okx_get() 직접 호출로 교체
+    1단계: CCXT fetch_long_short_ratio (swap exchange)
+    2단계: publicGetRubikStatContractsLongShortAccountRatio (계정비율)
+    3단계: _okx_get /rubik/stat/contracts/long-short-pos-ratio (포지션비율)
 
     반환: long_pct, short_pct (0.0 ~ 1.0)
     """
-    _empty = {'available': False, 'long_pct': 0.5, 'short_pct': 0.5}
+    _neutral      = {"available": False, "long_pct": 0.5, "short_pct": 0.5, "ratio": 1.0}
+    swap_symbol   = _to_ccxt_swap(symbol)
+    swap_exchange = getattr(exchange, "_swap", exchange)
+
+    # ── 1단계: CCXT fetch_long_short_ratio ──────────────────────────
+    try:
+        data = swap_exchange.fetch_long_short_ratio(swap_symbol, "1h", limit=1)
+        if data and len(data) > 0:
+            ls_ratio  = float(data[-1].get("longShortRatio", 1.0))
+            long_pct  = ls_ratio / (1.0 + ls_ratio)
+            short_pct = 1.0 - long_pct
+            logger.info(f"  📊 {symbol} 롱숏(CCXT): 롱 {long_pct*100:.1f}% / 숏 {short_pct*100:.1f}%")
+            return {
+                "long_pct":  round(long_pct,  4),
+                "short_pct": round(short_pct, 4),
+                "ratio":     round(ls_ratio,  4),
+                "available": True,
+            }
+    except AttributeError:
+        logger.debug(f"[collect_ls_ratio] CCXT 실패: {symbol}")
+    except Exception as e:
+        logger.debug(f"[collect_ls_ratio] CCXT 실패: {e}")
+
+    # ── 2단계: publicGetRubikStatContractsLongShortAccountRatio ─────
+    try:
+        result    = exchange.publicGetRubikStatContractsLongShortAccountRatio({
+            "ccy":    _to_ccy(symbol),
+            "period": "1H",
+            "limit":  "1",
+        })
+        data_list = result.get("data", [])
+        if data_list:
+            ls        = float(data_list[0][1])
+            long_pct  = ls / (1.0 + ls)
+            short_pct = 1.0 - long_pct
+            logger.info(f"  📊 {symbol} 롱숏(계정비율): 롱 {long_pct*100:.1f}%")
+            return {
+                "long_pct":  round(long_pct,  4),
+                "short_pct": round(short_pct, 4),
+                "ratio":     round(ls,        4),
+                "available": True,
+            }
+    except AttributeError:
+        logger.debug(f"[collect_ls_ratio] publicGetRubikStatContractsLongShortAccountRatio 미지원")
+    except Exception as e:
+        logger.debug(f"[collect_ls_ratio] 계정비율 폴백 실패: {e}")
+
+    # ── 3단계: _okx_get 직접 호출 ───────────────────────────────────
     try:
         resp = _okx_get("/rubik/stat/contracts/long-short-pos-ratio", {
-            'instId': _to_base_id(symbol),  # BTC-USDT (SWAP 없음)
-            'period': '5m',
-            'limit':  '1',
+            "instId": _to_base_id(symbol),
+            "period": "5m",
+            "limit":  "1",
         })
-
-        if resp.get("code") != "0" or not resp.get("data"):
-            logger.warning(f"  ⚠️  {symbol} 롱숏비율 응답 오류: {resp.get('msg', 'unknown')}")
-            return _empty
-
-        # OKX 반환: [[timestamp, longShortPosRatio], ...]
-        # longShortPosRatio = 롱포지션수 / 숏포지션수
-        ls_ratio  = float(resp['data'][0][1])
-        long_pct  = ls_ratio / (1.0 + ls_ratio)
-        short_pct = 1.0 - long_pct
-
-        logger.info(f"  📊 {symbol} 롱숏(직접): 롱 {long_pct*100:.1f}%")
-        return {
-            'available':  True,
-            'long_pct':   round(long_pct,  4),
-            'short_pct':  round(short_pct, 4),
-        }
+        if resp.get("code") == "0" and resp.get("data"):
+            ls        = float(resp["data"][0][1])
+            long_pct  = ls / (1.0 + ls)
+            short_pct = 1.0 - long_pct
+            logger.info(f"  📊 {symbol} 롱숏(포지션비율): 롱 {long_pct*100:.1f}%")
+            return {
+                "long_pct":  round(long_pct,  4),
+                "short_pct": round(short_pct, 4),
+                "ratio":     round(ls,        4),
+                "available": True,
+            }
     except Exception as e:
-        logger.warning(f"  ❌ {symbol} 롱숏비율 수집 실패: {e}")
-        return _empty
+        logger.warning(f"  ❌ {symbol} 롱숏비율 전체 실패: {e}")
+
+    return _neutral
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -224,7 +271,7 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
     }
     try:
         resp = _okx_get("/rubik/stat/taker-volume-contract", {
-            "instId": _to_swap_id(symbol),  # 중요: -SWAP suffix
+            "instId": _to_swap_id(symbol),
             "period": "5m",
             "limit":  str(min(config.TAKER_LOOKBACK, 100)),
         })
@@ -233,7 +280,6 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
             logger.warning(f"  ⚠️  {symbol} Taker 응답 오류: {resp.get('msg', 'unknown')}")
             return empty
 
-        # [[timestamp, buy_vol_usdt, sell_vol_usdt], ...] 최신→오래된
         n          = min(20, len(resp["data"]))
         total_buy  = sum(float(row[1]) for row in resp["data"][:n])
         total_sell = sum(float(row[2]) for row in resp["data"][:n])
@@ -270,70 +316,98 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
 
 def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
     """
-    OI 변화율 (1시간 전 대비 현재).
-    현재 OI:     GET /api/v5/public/open-interest  (instId=BTC-USDT-SWAP)
-    OI 히스토리: GET /api/v5/rubik/stat/contracts/open-interest-history
-
-    ✅ 수정: path에 "GET /api/v5/..." 전체를 넣던 버그 수정
-             → _okx_get에는 "/rubik/stat/..." 형식만 전달
+    OI 변화율 (이전 작동 방식 복원).
+    1단계: swap_exchange.fetch_open_interest_history() 사용
+    2단계: 실패 시 _okx_get 직접 호출 폴백
+    TypeError(URL None) 및 AttributeError 발생 시 조용히 neutral 반환.
     """
-    empty = {
-        "available": False, "change_pct": 0.0, "current_oi": 0.0, "prev_oi": 0.0,
-        "direction": "", "interpretation": "",
+    _neutral = {
+        "available":      False,
+        "change_pct":     0.0,
+        "current_oi":     0.0,
+        "prev_oi":        0.0,
+        "direction":      "neutral",
+        "interpretation": "neutral",
     }
+    swap_symbol   = _to_ccxt_swap(symbol)
+    swap_exchange = getattr(exchange, "_swap", exchange)
+
+    # ── 1단계: CCXT fetch_open_interest_history ─────────────────────
     try:
-        # 현재 OI 조회
+        history = swap_exchange.fetch_open_interest_history(swap_symbol, "1h", limit=2)
+
+        if history and len(history) >= 2:
+            current_oi = float(
+                history[-1].get("openInterestAmount") or
+                history[-1].get("openInterest") or 0
+            )
+            prev_oi = float(
+                history[-2].get("openInterestAmount") or
+                history[-2].get("openInterest") or 0
+            )
+            if prev_oi > 0 and current_oi > 0:
+                change_pct = (current_oi - prev_oi) / prev_oi
+                direction  = "increasing" if change_pct > 0 else "decreasing"
+                logger.info(f"  📈 {symbol} OI: {change_pct*100:+.2f}% [{direction}]")
+                return {
+                    "available":      True,
+                    "current_oi":     round(current_oi, 2),
+                    "prev_oi":        round(prev_oi,    2),
+                    "change_pct":     round(change_pct, 6),
+                    "direction":      direction,
+                    "interpretation": "bullish_trend_confirm" if change_pct > 0.02 else
+                                      "bearish_trend_confirm" if change_pct < -0.02 else "neutral",
+                }
+    except (TypeError, AttributeError):
+        logger.debug(f"[collect_oi_change] {symbol} 미지원 또는 URL 오류")
+    except Exception as e:
+        logger.warning(f"[collect_oi_change] {symbol}: {e}")
+
+    # ── 2단계: _okx_get 직접 호출 폴백 ─────────────────────────────
+    try:
         resp_now = _okx_get("/public/open-interest", {
             "instId": _to_swap_id(symbol),
         })
-
         if resp_now.get("code") != "0" or not resp_now.get("data"):
-            logger.warning(f"  ⚠️  {symbol} OI 현재값 조회 실패: {resp_now.get('msg', 'unknown')}")
-            return empty
+            return _neutral
 
         current_oi = float(resp_now["data"][0].get("oi", 0))
         if current_oi <= 0:
-            return empty
+            return _neutral
 
-        # 1시간 전 OI 조회 (히스토리)
         resp_hist = _okx_get("/rubik/stat/contracts/open-interest-history", {
-            "ccy":    _to_ccy(symbol),  # BTC, ETH 등
+            "ccy":    _to_ccy(symbol),
             "ctType": "SWAP",
             "ty":     "CONTRACTS",
             "bar":    "1H",
         })
-
         if resp_hist.get("code") != "0" or not resp_hist.get("data"):
-            logger.warning(f"  ⚠️  {symbol} OI 히스토리 조회 실패: {resp_hist.get('msg', 'unknown')}")
-            return empty
+            return _neutral
 
-        hist_data = resp_hist.get("data", [])
+        hist_data = resp_hist["data"]
         if len(hist_data) < 2:
-            logger.warning(f"  ⚠️  {symbol} OI 히스토리 데이터 부족: {len(hist_data)}개")
-            return empty
+            return _neutral
 
-        # 가장 오래된 데이터 = 1시간 전 추정
         prev_oi = float(hist_data[-1].get("oi", 0))
         if prev_oi <= 0:
-            return empty
+            return _neutral
 
         change_pct = (current_oi - prev_oi) / prev_oi
         direction  = "increasing" if change_pct > 0 else "decreasing"
-
-        logger.info(f"  📈 {symbol} OI: {prev_oi:.0f} → {current_oi:.0f} ({change_pct*100:+.2f}%) [{direction}]")
-
+        logger.info(f"  📈 {symbol} OI(폴백): {change_pct*100:+.2f}% [{direction}]")
         return {
             "available":      True,
-            "change_pct":     round(change_pct, 6),
             "current_oi":     round(current_oi, 2),
             "prev_oi":        round(prev_oi,    2),
+            "change_pct":     round(change_pct, 6),
             "direction":      direction,
             "interpretation": "bullish_trend_confirm" if change_pct > 0.02 else
                               "bearish_trend_confirm" if change_pct < -0.02 else "neutral",
         }
     except Exception as e:
-        logger.warning(f"  ❌ {symbol} OI 실패: {e}")
-        return empty
+        logger.warning(f"  ❌ {symbol} OI 폴백 실패: {e}")
+
+    return _neutral
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -381,7 +455,7 @@ def collect(exchange: ccxt.okx, symbol: str) -> dict:
         "ls_ratio":       ls_ratio,
         "oi_change":      oi_change,
         "taker_volume":   taker_volume,
-        "liquidations":   {},   # analyze_liquidations()는 df_15m 직접 사용
+        "liquidations":   {},
         "price":          ticker.get("last", 0.0),
         "microstructure": micro,
     }
@@ -402,7 +476,6 @@ def collect_all_data(exchange: ccxt.okx, symbols) -> dict:
     if single:
         return collect(exchange, single)
 
-    # 전체 심볼 처리
     if isinstance(symbols, str):
         symbols = [symbols]
     results = {}
