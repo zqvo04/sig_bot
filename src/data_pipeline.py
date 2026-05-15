@@ -5,10 +5,10 @@ data_pipeline.py — OKX 선물 데이터 수집 파이프라인
 CCXT는 fetch_ohlcv / fetch_ticker / fetch_funding_rate 등 표준 메서드만 사용.
 
 수정 이력:
-  - collect_ls_ratio:    /public/account-ratio로 변경 (공개 계정비율 API)
+  - collect_ls_ratio:    _okx_get() 직접 호출로 교체 (CCXT 메서드 미존재)
   - collect_taker_volume: instType 파라미터 제거, _okx_get 사용, instId → -SWAP suffix
   - collect_funding_rate: BTC/USDT:USDT swap 형식 명시
-  - collect_oi_change:   bar 파라미터로 변경 (period 제거), ccy/ctType/ty 추가
+  - collect_oi_change:   path 버그 수정 ("GET /api/v5/..." → "/rubik/stat/...")
   - collect_all_data:    SINGLE_SYMBOL → flat dict 반환 (main.py 호환)
 ──────────────────────────────────────────────────────────────────────
 """
@@ -168,18 +168,19 @@ def collect_funding_rate(exchange: ccxt.okx, symbol: str) -> Optional[dict]:
 # 3. 롱숏 비율 수집 (포지션 수 기준)
 # ══════════════════════════════════════════════════════════════════════════════
 
-
 def collect_ls_ratio(exchange: ccxt.okx, symbol: str) -> dict:
     """
     포지션 수 기준 롱숏 비율 (직접, Position-Level)
     OKX: GET /api/v5/rubik/stat/contracts/long-short-pos-ratio
          instId: BTC-USDT  (SWAP suffix 없음)
 
+    ✅ 수정: CCXT에 publicGetRubikStatContractsLongShortPosRatio 메서드 없음
+             → _okx_get() 직접 호출로 교체
+
     반환: long_pct, short_pct (0.0 ~ 1.0)
     """
     _empty = {'available': False, 'long_pct': 0.5, 'short_pct': 0.5}
     try:
-        # ✅ 수정: CCXT 메서드 없음 → _okx_get() 직접 호출
         resp = _okx_get("/rubik/stat/contracts/long-short-pos-ratio", {
             'instId': _to_base_id(symbol),  # BTC-USDT (SWAP 없음)
             'period': '5m',
@@ -191,6 +192,7 @@ def collect_ls_ratio(exchange: ccxt.okx, symbol: str) -> dict:
             return _empty
 
         # OKX 반환: [[timestamp, longShortPosRatio], ...]
+        # longShortPosRatio = 롱포지션수 / 숏포지션수
         ls_ratio  = float(resp['data'][0][1])
         long_pct  = ls_ratio / (1.0 + ls_ratio)
         short_pct = 1.0 - long_pct
@@ -226,7 +228,7 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
             "period": "5m",
             "limit":  str(min(config.TAKER_LOOKBACK, 100)),
         })
-        
+
         if resp.get("code") != "0" or not resp.get("data"):
             logger.warning(f"  ⚠️  {symbol} Taker 응답 오류: {resp.get('msg', 'unknown')}")
             return empty
@@ -262,12 +264,6 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
         return empty
 
 
-
-        
-        
-            return empty
-        
-
 # ════════════════════════════════════════════════════════════════════
 # 5. OI 변화율
 # ════════════════════════════════════════════════════════════════════
@@ -275,13 +271,18 @@ def collect_taker_volume(exchange: ccxt.okx, symbol: str) -> dict:
 def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
     """
     OI 변화율 (1시간 전 대비 현재).
-    현재 OI:  GET /api/v5/public/open-interest  (instId=BTC-USDT-SWAP)
+    현재 OI:     GET /api/v5/public/open-interest  (instId=BTC-USDT-SWAP)
     OI 히스토리: GET /api/v5/rubik/stat/contracts/open-interest-history
+
+    ✅ 수정: path에 "GET /api/v5/..." 전체를 넣던 버그 수정
+             → _okx_get에는 "/rubik/stat/..." 형식만 전달
     """
-    empty = {"available": False, "change_pct": 0.0, "current_oi": 0.0, "prev_oi": 0.0,
-             "direction": "", "interpretation": ""}
+    empty = {
+        "available": False, "change_pct": 0.0, "current_oi": 0.0, "prev_oi": 0.0,
+        "direction": "", "interpretation": "",
+    }
     try:
-        # 현재 OI
+        # 현재 OI 조회
         resp_now = _okx_get("/public/open-interest", {
             "instId": _to_swap_id(symbol),
         })
@@ -294,11 +295,11 @@ def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
         if current_oi <= 0:
             return empty
 
-        # ✅ 수정: "GET /api/v5/..." 제거 → path만 전달
+        # 1시간 전 OI 조회 (히스토리)
         resp_hist = _okx_get("/rubik/stat/contracts/open-interest-history", {
             "ccy":    _to_ccy(symbol),  # BTC, ETH 등
             "ctType": "SWAP",
-            "ty":     "CONTRACTS",      # COIN 또는 CONTRACTS
+            "ty":     "CONTRACTS",
             "bar":    "1H",
         })
 
@@ -311,6 +312,7 @@ def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
             logger.warning(f"  ⚠️  {symbol} OI 히스토리 데이터 부족: {len(hist_data)}개")
             return empty
 
+        # 가장 오래된 데이터 = 1시간 전 추정
         prev_oi = float(hist_data[-1].get("oi", 0))
         if prev_oi <= 0:
             return empty
@@ -332,7 +334,6 @@ def collect_oi_change(exchange: ccxt.okx, symbol: str) -> dict:
     except Exception as e:
         logger.warning(f"  ❌ {symbol} OI 실패: {e}")
         return empty
-
 
 
 # ════════════════════════════════════════════════════════════════════
