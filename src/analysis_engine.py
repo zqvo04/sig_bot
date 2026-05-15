@@ -1,15 +1,16 @@
 """
 analysis_engine.py — 분석 엔진
 [이번 변경]
-- Hidden Divergence (추세 지속 확증) 추가
+- analyze_oi_change 제거:
+    /rubik/stat/contracts/open-interest-history 400 오류 지속,
+    항상 neutral(50) 반환으로 신호 가치 없음 → 완전 제거
+    run_full_analysis에서 "oi_change": {"available": False} 스텁 반환 유지 (하위 호환)
+- Hidden Divergence (추세 지속 확증) 유지
 - analyze_mtf_rsi: pullback_long_weak / _micro 플래그 명시 반환
-- analyze_market_structure: 스윙 임계값 0.2%→0.5%
-- analyze_vol_price_divergence: 임계값 0.3%+30%→0.5%+50%
-- 신규: detect_fvg, detect_bos_choch, check_fibonacci_levels
-- run_full_analysis: 신규 함수 통합
-[Fix Issue 1] calculate_ema_multiplier: regime 파라미터 추가
-  - 국면별 EMA 배율 테이블 사용 → 로그와 실제 적용값 일치
-  - run_full_analysis에서 regime 확정 후 호출되도록 순서 보장
+- analyze_market_structure: 스윙 임계값 0.5%
+- analyze_vol_price_divergence: 임계값 0.5%+50%
+- detect_fvg, detect_bos_choch, check_fibonacci_levels 유지
+- [Fix Issue 1] calculate_ema_multiplier: regime 파라미터 추가
 """
 import logging
 from typing import Optional
@@ -305,12 +306,6 @@ def _ema_direction(df: pd.DataFrame) -> str:
     return "bullish" if ema_fast>ema_slow else "bearish"
 
 def calculate_ema_multiplier(ohlcv_dict: dict, direction: str, regime: str = "UNKNOWN") -> dict:
-    """
-    [Fix Issue 1] regime 파라미터 추가
-    - 국면별 EMA 배율 테이블(REGIME_EMA_MULTIPLIERS)을 사용하여
-      로그에 찍히는 배율과 실제 scoring_system에서 적용하는 배율을 일치시킴
-    - run_full_analysis에서 regime 확정 후 호출해야 정확한 값 로깅됨
-    """
     tf_signals = {
         "15m": _ema_direction(ohlcv_dict.get("15m")),
         "1h":  _ema_direction(ohlcv_dict.get("1h")),
@@ -320,7 +315,6 @@ def calculate_ema_multiplier(ohlcv_dict: dict, direction: str, regime: str = "UN
     reverse_count = sum(1 for sig in tf_signals.values() if sig == opposite)
     same_count    = sum(1 for sig in tf_signals.values() if sig == ("bullish" if direction=="long" else "bearish"))
 
-    # [Fix Issue 1] 국면별 배율 테이블 사용
     regime_mult_table = config.REGIME_EMA_MULTIPLIERS.get(regime, config.EMA_MULTIPLIER)
     multiplier        = regime_mult_table.get(reverse_count, 1.0)
 
@@ -328,7 +322,6 @@ def calculate_ema_multiplier(ohlcv_dict: dict, direction: str, regime: str = "UN
     elif reverse_count==3: ema_dir = "bearish" if direction=="long" else "bullish"
     else:                  ema_dir = "mixed"
 
-    # [Fix Issue 1] 로그에 regime 포함 → 배율 불일치 혼란 방지
     logger.info(f"[EMA배율/{direction.upper()}] {tf_signals} → ×{multiplier:.2f}  [{regime}]")
     return {
         "tf_signals":    tf_signals,
@@ -512,35 +505,6 @@ def analyze_liquidations(liq_data: dict, df_15m=None) -> dict:
 
 
 # ══════════════════════════════════════════════
-# 8. OI 변화율
-# ══════════════════════════════════════════════
-
-def analyze_oi_change(oi_data: dict, df_15m: Optional[pd.DataFrame]) -> dict:
-    if not oi_data or not oi_data.get("available"):
-        return {"long_score":50,"short_score":50,"interpretation":"no_data","available":False}
-    change_pct=oi_data.get("change_pct",0.0)
-    oi_increasing=change_pct>config.OI_CHANGE_MILD; oi_decreasing=change_pct<-config.OI_CHANGE_MILD
-    price_change=0.0
-    if df_15m is not None and len(df_15m)>=5:
-        cur=float(df_15m["close"].iloc[-1]); prev=float(df_15m["close"].iloc[-5])
-        price_change=(cur-prev)/prev if prev>0 else 0.0
-    price_up=price_change>0.001; price_down=price_change<-0.001
-    if oi_increasing and price_up:
-        strength=min(1.0,abs(change_pct)/config.OI_CHANGE_STRONG)
-        ls=65+strength*20; ss=35-strength*10; interp="bullish_trend_confirm"
-    elif oi_increasing and price_down:
-        strength=min(1.0,abs(change_pct)/config.OI_CHANGE_STRONG)
-        ss=65+strength*20; ls=35-strength*10; interp="bearish_trend_confirm"
-    elif oi_decreasing and price_up:  ls,ss=55,45; interp="short_covering"
-    elif oi_decreasing and price_down: ls,ss=58,42; interp="long_liquidation"
-    else:                              ls,ss=50,50; interp="neutral"
-    return {"long_score":round(min(100,max(0,ls)),2),"short_score":round(min(100,max(0,ss)),2),
-            "change_pct":round(change_pct*100,4),"interpretation":interp,
-            "direction":"increasing" if oi_increasing else("decreasing" if oi_decreasing else "stable"),
-            "available":True}
-
-
-# ══════════════════════════════════════════════
 # H: 시장 국면 분류
 # ══════════════════════════════════════════════
 
@@ -600,7 +564,7 @@ def evaluate_gates(direction: str, funding: dict, ls_ratio_result: dict) -> dict
 
 
 # ══════════════════════════════════════════════
-# FVG, BOS/CHoCH, 피보나치 (기존과 동일)
+# FVG, BOS/CHoCH, 피보나치
 # ══════════════════════════════════════════════
 
 def detect_fvg(df: pd.DataFrame, lookback: int = 30) -> dict:
@@ -798,7 +762,7 @@ def analyze_vol_price_divergence(df: pd.DataFrame) -> dict:
 
 
 # ══════════════════════════════════════════════
-# 10. 전체 분석 통합  [Fix Issue 1 반영]
+# 10. 전체 분석 통합
 # ══════════════════════════════════════════════
 
 def run_full_analysis(symbol: str, collected_data: dict) -> dict:
@@ -806,12 +770,17 @@ def run_full_analysis(symbol: str, collected_data: dict) -> dict:
     logger.info(f"{'─'*50}")
     logger.info(f"🔬 분석: {symbol}")
 
-    ohlcv=collected_data.get("ohlcv",{}); ticker=collected_data.get("ticker") or {}
-    funding_data=collected_data.get("funding_rate"); ls_raw=collected_data.get("ls_ratio",{})
-    oi_raw=collected_data.get("oi_change",{}); taker_raw=collected_data.get("taker_volume",{})
-    liq_raw=collected_data.get("liquidations",{})
+    ohlcv        = collected_data.get("ohlcv", {})
+    ticker       = collected_data.get("ticker") or {}
+    funding_data = collected_data.get("funding_rate")
+    ls_raw       = collected_data.get("ls_ratio", {})
+    taker_raw    = collected_data.get("taker_volume", {})
+    liq_raw      = collected_data.get("liquidations", {})
+    # oi_change 수집 안 함 — API 400 오류 지속, 항상 neutral 반환으로 제거
 
-    df_15m=ohlcv.get("15m"); df_1h=ohlcv.get("1h"); df_4h=ohlcv.get("4h")
+    df_15m = ohlcv.get("15m")
+    df_1h  = ohlcv.get("1h")
+    df_4h  = ohlcv.get("4h")
 
     rsi     = analyze_mtf_rsi(df_15m, df_1h, df_4h)
     bb      = analyze_bollinger_bands(df_15m)
@@ -819,16 +788,15 @@ def run_full_analysis(symbol: str, collected_data: dict) -> dict:
     adx_1h  = calculate_adx(df_1h)
     funding = analyze_funding_rate(funding_data)
 
-    # 국면 확정을 EMA 계산 전에 수행 (Fix Issue 1: regime 파라미터 전달 위해)
-    regime  = classify_market_regime(df_15m, adx_15m, bb)
+    # 국면 확정을 EMA 계산 전에 수행 (Fix Issue 1)
+    regime      = classify_market_regime(df_15m, adx_15m, bb)
     regime_name = regime.get("regime", "UNKNOWN")
 
-    ls_ratio= analyze_long_short_ratio(ls_raw, regime_name)
-    oi      = analyze_oi_change(oi_raw, df_15m)
-    taker   = analyze_taker_volume(taker_raw)
-    liq     = analyze_liquidations(liq_raw, df_15m)
-    vol     = check_volume_confirmation(df_15m)
-    atr     = get_atr_state(df_15m)
+    ls_ratio = analyze_long_short_ratio(ls_raw, regime_name)
+    taker    = analyze_taker_volume(taker_raw)
+    liq      = analyze_liquidations(liq_raw, df_15m)
+    vol      = check_volume_confirmation(df_15m)
+    atr      = get_atr_state(df_15m)
 
     candle_pattern = analyze_candle_pattern(df_15m)
     market_struct  = analyze_market_structure(df_15m)
@@ -838,7 +806,6 @@ def run_full_analysis(symbol: str, collected_data: dict) -> dict:
     bos_choch = detect_bos_choch(df_15m)
     fibonacci = check_fibonacci_levels(df_15m)
 
-    # [Fix Issue 1] regime_name 전달 → 로그 배율과 실제 적용 배율 일치
     ema_long  = calculate_ema_multiplier(ohlcv, "long",  regime_name)
     ema_short = calculate_ema_multiplier(ohlcv, "short", regime_name)
 
@@ -869,7 +836,7 @@ def run_full_analysis(symbol: str, collected_data: dict) -> dict:
         "adx_1h":           adx_1h,
         "funding_rate":     funding,
         "ls_ratio":         ls_ratio,
-        "oi_change":        oi,
+        "oi_change":        {"available": False},  # ❌ 제거됨 — 하위 호환성 스텁
         "taker_volume":     taker,
         "liquidations":     liq,
         "volume":           vol,
