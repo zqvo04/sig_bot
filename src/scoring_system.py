@@ -1,13 +1,19 @@
 """
-scoring_system.py — 점수 산출 (v3)
+scoring_system.py — 점수 산출 (v3.1)
 ────────────────────────────────────────────────────────────────────────
 [v3 주요 변경]
 1. ADX 배율 제거: EMA 배율이 이미 방향 불확실성 반영 → ADX 이중 억제 제거
 2. RANGING EMA 3역방향: 0.72 → 0.82 (반등 신호 허용)
 3. 보너스 18개로 정리 (중복/노이즈 11개 제거)
-4. 보너스 캡: 최대 28pt (기존 35pt)
+4. 보너스 캡: tiered (36/18, 44/26, ∞/36)
 5. 극단 과매도 보너스 10pt 추가, BB streak 면제 조건 추가
 6. 보너스 개별 값 하향 조정 (과적합 방지)
+
+[v3.1 OI 제거]
+- scores dict에서 oi_change 제거 (weights에도 없음)
+- OI 스파이크 필터 제거 (oi_change 항상 available:False)
+- 추세지속 보너스: EMA+OI+Taker → EMA+Taker (OI 조건 제거)
+- 보너스 이름: "추세지속:EMA+OI+Taker" → "추세지속:EMA+Taker"
 ────────────────────────────────────────────────────────────────────────
 """
 import json, logging, os
@@ -18,11 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 def _get_tiered_bonus_cap(base_score: float) -> int:
-    """base 점수 구간별 보너스 상한 (v3: 최대 28pt)"""
+    """base 점수 구간별 보너스 상한"""
     for threshold, cap in config.BONUS_CAP_TIERS:
         if base_score < threshold:
             return cap
-    return 28
+    return 36
 
 
 def calculate_entry_score(analysis: dict, direction: str,
@@ -35,30 +41,32 @@ def calculate_entry_score(analysis: dict, direction: str,
     bb      = analysis.get("bollinger",    {})
     funding = analysis.get("funding_rate", {})
     ls      = analysis.get("ls_ratio",     {})
-    oi      = analysis.get("oi_change",    {})
     taker   = analysis.get("taker_volume", {})
     liq     = analysis.get("liquidations", {})
     vol     = analysis.get("volume",       {})
     adx_15m = analysis.get("adx_15m",     {})
     regime  = analysis.get("regime",       {})
+    # oi_change는 항상 {"available": False} — scores/weights에서 제거됨
+    # 하위 호환용으로만 참조 (청산프록시 상충 판단 등)
+    oi      = analysis.get("oi_change",    {})
 
     ema_info      = analysis.get(f"ema_{d}", {})
     reverse_count = ema_info.get("reverse_count", 0)
 
-    # RSI 값 추출 (극단 판정에 사용)
+    # RSI 값 추출
     rsi_val_15m = rsi.get("value",    50.0)
     rsi_val_1h  = rsi.get("value_1h", 50.0)
     rsi_val_4h  = rsi.get("value_4h", 50.0)
     bb_state_str = bb.get("state", "")
 
+    # ── 가중합 계산 (oi_change 제거됨) ──────────────────────────
     scores = {
-        "rsi":              rsi.get(f"{d}_score",    50.0),
-        "bollinger":        bb.get(f"{d}_score",     50.0),
+        "rsi":              rsi.get(f"{d}_score",     50.0),
+        "bollinger":        bb.get(f"{d}_score",      50.0),
         "funding_rate":     funding.get(f"{d}_score", 50.0),
-        "long_short_ratio": ls.get(f"{d}_score",     50.0),
-        "taker_volume":     taker.get(f"{d}_score",  50.0),
-        "oi_change":        oi.get(f"{d}_score",     50.0),
-        "volume":           vol.get("score",          0.0),
+        "long_short_ratio": ls.get(f"{d}_score",      50.0),
+        "taker_volume":     taker.get(f"{d}_score",   50.0),
+        "volume":           vol.get("score",           0.0),
     }
 
     regime_name = regime.get("regime", "UNKNOWN")
@@ -111,7 +119,7 @@ def calculate_entry_score(analysis: dict, direction: str,
         )
 
     # base (게이트 패널티까지)
-    base_score    = raw_score * ema_mult * gate_penalty
+    base_score       = raw_score * ema_mult * gate_penalty
     base_before_soft = base_score
 
     # ── MTF RSI 극단값 패널티 (soft) ─────────────────────────────
@@ -157,27 +165,13 @@ def calculate_entry_score(analysis: dict, direction: str,
         base_score *= exhaustion_mult
         logger.info(f"[EXPLOSIVE소진/{d.upper()}] {exhaustion_reason}")
 
-    # ── OI 스파이크 필터 ─────────────────────────────────────────
-    oi_change_pct  = abs(oi.get("change_pct", 0.0))
-    oi_direction   = oi.get("direction", "")
-    taker_bias_raw = taker.get("bias", "neutral")
-    if oi_change_pct >= config.OI_SPIKE_THRESHOLD:
-        oi_spike_hit = (
-            (d == "long"  and oi_direction == "increasing" and taker_bias_raw == "sell_dominant") or
-            (d == "short" and oi_direction == "increasing" and taker_bias_raw == "buy_dominant")
-        )
-        if oi_spike_hit:
-            base_score = max(0.0, base_score - config.OI_SPIKE_SCORE_PENALTY)
-            logger.info(f"[OISpike/{d.upper()}] OI급증+역방향 → -{config.OI_SPIKE_SCORE_PENALTY}pt")
-
     # ── BB 연속 이탈 억제 ────────────────────────────────────────
-    BB_STREAK   = 3
+    BB_STREAK    = 3
     lower_streak = bb.get("lower_streak", 0)
     upper_streak = bb.get("upper_streak", 0)
     bb_suppressed = False; bb_reason = None
 
     if d == "long" and lower_streak >= BB_STREAK and regime_name == "TRENDING":
-        # 극단 과매도 = 클라이맥스 셀링 → 억제 해제
         if rsi_val_15m <= config.BB_STREAK_SUPPRESS_RSI_EXEMPT:
             logger.info(
                 f"[BB억제면제/{d.upper()}] RSI극단({rsi_val_15m:.0f}≤{config.BB_STREAK_SUPPRESS_RSI_EXEMPT}) "
@@ -208,11 +202,11 @@ def calculate_entry_score(analysis: dict, direction: str,
         }
 
     # ══════════════════════════════════════════════════════════
-    # 보너스 계산 (v3: 18개 항목)
+    # 보너스 계산
     # ══════════════════════════════════════════════════════════
     bonuses = []
 
-    # ① 극단 과매도/과매수 보너스 (최우선 — 클라이맥스 반등)
+    # ① 극단 과매도/과매수 보너스
     if is_extreme_oversold:
         bonuses.append(("멀티TF극단과매도", config.BONUS_EXTREME_OVERSOLD_MTF))
         logger.info(f"[극단과매도보너스] ★ +{config.BONUS_EXTREME_OVERSOLD_MTF}pt")
@@ -235,7 +229,7 @@ def calculate_entry_score(analysis: dict, direction: str,
     if fr_ok and ls_ok:
         bonuses.append(("펀딩비+롱숏비율", config.BONUS_FUNDING_LS_ALIGN))
 
-    # ④ 대규모 청산 [Issue 4: cascade vs climax 구분]
+    # ④ 대규모 청산
     liq_signal = liq.get("signal", "none")
     liq_large  = liq.get("is_large", False)
     liq_api_fired = (
@@ -254,24 +248,21 @@ def calculate_entry_score(analysis: dict, direction: str,
     ):
         bonuses.append(("대규모청산꼬리", config.BONUS_LIQUIDATION))
 
-    # ⑤ 추세 지속 (EMA+OI+Taker 삼중 확인)
-    ema_same    = ema_info.get("same_count", 0)
-    oi_interp   = oi.get("interpretation", "")
-    taker_bias  = taker.get("bias", "neutral")
-    taker_str   = taker.get("strength", "neutral")
-    oi_confirms_long  = oi_interp in ("bullish_trend_confirm", "short_covering")
-    oi_confirms_short = oi_interp in ("bearish_trend_confirm", "long_liquidation")
+    # ⑤ 추세 지속 (EMA+Taker 확인 — OI 제거됨)
+    ema_same   = ema_info.get("same_count", 0)
+    taker_bias = taker.get("bias", "neutral")
+    taker_str  = taker.get("strength", "neutral")
 
     trend_strong_ok = (
         ema_same == 3 and taker_str in ("strong", "mild") and (
-            (d == "long"  and oi_confirms_long  and taker_bias == "buy_dominant") or
-            (d == "short" and oi_confirms_short and taker_bias == "sell_dominant")
+            (d == "long"  and taker_bias == "buy_dominant") or
+            (d == "short" and taker_bias == "sell_dominant")
         )
     )
     if trend_strong_ok:
-        bonuses.append((f"추세지속:EMA+OI+Taker({'롱' if d=='long' else '숏'})", config.BONUS_TREND_STRONG))
+        bonuses.append((f"추세지속:EMA+Taker({'롱' if d=='long' else '숏'})", config.BONUS_TREND_STRONG))
 
-    # ⑥ 눌림목 (명시적 플래그 사용)
+    # ⑥ 눌림목
     pb_ok_strong = (
         (d == "long"  and rsi.get("pullback_long_strong",  False) and ema_same >= 2) or
         (d == "short" and rsi.get("pullback_short_strong", False) and ema_same >= 2)
@@ -302,16 +293,16 @@ def calculate_entry_score(analysis: dict, direction: str,
     elif d == "long" and vpd.get("bullish_vol_div"):
         bonuses.append(("거래량강세다이버전스", config.BONUS_VOL_PRICE_DIV))
 
-    # ⑧ 돌파/붕괴 실패 (고신뢰)
+    # ⑧ 돌파/붕괴 실패
     ms = analysis.get("market_structure", {})
     if d == "short":
-        if ms.get("failed_breakout"): bonuses.append(("돌파실패", config.BONUS_FAILED_BREAKOUT))
+        if ms.get("failed_breakout"): bonuses.append(("돌파실패",      config.BONUS_FAILED_BREAKOUT))
         if ms.get("lower_high"):      bonuses.append(("LowerHigh구조", config.BONUS_MARKET_STRUCT_TREND))
     elif d == "long":
-        if ms.get("failed_breakdown"):bonuses.append(("붕괴실패", config.BONUS_FAILED_BREAKOUT))
+        if ms.get("failed_breakdown"):bonuses.append(("붕괴실패",      config.BONUS_FAILED_BREAKOUT))
         if ms.get("higher_low"):      bonuses.append(("HigherLow구조", config.BONUS_MARKET_STRUCT_TREND))
 
-    # ⑨ FVG [Issue 2: 양방향 동시 반감]
+    # ⑨ FVG
     fvg      = analysis.get("fvg", {})
     bull_fvg = fvg.get("in_bullish_fvg", False)
     bear_fvg = fvg.get("in_bearish_fvg", False)
@@ -341,16 +332,16 @@ def calculate_entry_score(analysis: dict, direction: str,
     fibonacci = analysis.get("fibonacci", {})
     if d == "long":
         if fibonacci.get("in_golden_pocket_long"):
-            bonuses.append((f"피보황금포켓롱", config.BONUS_FIB_GOLDEN_POCKET))
+            bonuses.append(("피보황금포켓롱", config.BONUS_FIB_GOLDEN_POCKET))
             logger.info(f"[피보] ★ 롱 황금포켓 +{config.BONUS_FIB_GOLDEN_POCKET}pt")
         elif fibonacci.get("near_key_level_long"):
-            bonuses.append((f"피보주요레벨롱", config.BONUS_FIB_KEY_LEVEL))
+            bonuses.append(("피보주요레벨롱", config.BONUS_FIB_KEY_LEVEL))
     elif d == "short":
         if fibonacci.get("in_golden_pocket_short"):
-            bonuses.append((f"피보황금포켓숏", config.BONUS_FIB_GOLDEN_POCKET))
+            bonuses.append(("피보황금포켓숏", config.BONUS_FIB_GOLDEN_POCKET))
             logger.info(f"[피보] ★ 숏 황금포켓 +{config.BONUS_FIB_GOLDEN_POCKET}pt")
         elif fibonacci.get("near_key_level_short"):
-            bonuses.append((f"피보주요레벨숏", config.BONUS_FIB_KEY_LEVEL))
+            bonuses.append(("피보주요레벨숏", config.BONUS_FIB_KEY_LEVEL))
 
     # ⑫ 히든 다이버전스
     hidden_bull = rsi.get("hidden_bull_div", False)
@@ -365,13 +356,13 @@ def calculate_entry_score(analysis: dict, direction: str,
     # ⑬ 캔들 패턴
     candle = analysis.get("candle_pattern", {})
     if d == "short":
-        if candle.get("bearish_pin"):  bonuses.append(("베어리시핀바",  config.BONUS_CANDLE_PIN_BAR))
-        elif candle.get("bearish_engulf"): bonuses.append(("베어리시인걸핑", config.BONUS_CANDLE_ENGULFING))
+        if candle.get("bearish_pin"):        bonuses.append(("베어리시핀바",    config.BONUS_CANDLE_PIN_BAR))
+        elif candle.get("bearish_engulf"):   bonuses.append(("베어리시인걸핑",  config.BONUS_CANDLE_ENGULFING))
     elif d == "long":
-        if candle.get("bullish_pin"):  bonuses.append(("불리시핀바",    config.BONUS_CANDLE_PIN_BAR))
-        elif candle.get("bullish_engulf"): bonuses.append(("불리시인걸핑",   config.BONUS_CANDLE_ENGULFING))
+        if candle.get("bullish_pin"):        bonuses.append(("불리시핀바",      config.BONUS_CANDLE_PIN_BAR))
+        elif candle.get("bullish_engulf"):   bonuses.append(("불리시인걸핑",    config.BONUS_CANDLE_ENGULFING))
 
-    # ⑭ 거래량 폭발 (EMA 미정렬 시에도 적용)
+    # ⑭ 거래량 폭발
     atr_val   = analysis.get("atr", {})
     vol_ratio = vol.get("ratio", 1.0)
     adx_val   = adx_15m.get("adx", 0.0)
@@ -446,7 +437,6 @@ def calculate_entry_score(analysis: dict, direction: str,
         logger.info(f"[CHoCH/{d.upper()}] ⚠️ 상승전환 경고 중 숏 → ×{choch_penalty}")
 
     # ── 최종 점수 계산 ───────────────────────────────────────────
-    # 공식: (base + bonus) × soft_penalty + micro_penalty
     soft_penalty  = mtf_penalty * exhaustion_mult * candle_momentum_mult * choch_penalty
     micro_penalty = micro_result.get("total_penalty", 0) if micro_result else 0
 
@@ -460,7 +450,7 @@ def calculate_entry_score(analysis: dict, direction: str,
     signal = (final_score >= regime_threshold and final_score >= config.SIGNAL_MIN_SCORE)
 
     # ── 로그 ─────────────────────────────────────────────────────
-    micro_note = f" +micro{micro_penalty:+d}pt" if micro_penalty != 0 else ""
+    micro_note   = f" +micro{micro_penalty:+d}pt" if micro_penalty != 0 else ""
     soft_applied = soft_penalty < 1.0
 
     if soft_applied:
@@ -512,7 +502,7 @@ def _build_breakdown(d, scores, weights, raw, ema_m, pen,
     label = "🟢 롱" if d == "long" else "🔴 숏"
     lines = [f"{label} 진입 점수  [{regime.get('icon','')} {regime.get('regime','')}]"]
     for key, weight in weights.items():
-        s = scores[key]; contrib = s * weight
+        s = scores.get(key, 0.0); contrib = s * weight
         bar = "█"*int(s/10) + "░"*(10-int(s/10))
         lines.append(f"  {_score_label(key):<14} {bar} {s:>5.1f}pt × {weight:.0%} = {contrib:>4.1f}pt")
     lines.append(f"  {'─'*46}")
@@ -534,9 +524,14 @@ def _build_breakdown(d, scores, weights, raw, ema_m, pen,
 
 
 def _score_label(key: str) -> str:
-    return {"rsi":"RSI","bollinger":"볼린저밴드","funding_rate":"펀딩비",
-            "long_short_ratio":"롱숏비율","taker_volume":"Taker비율",
-            "oi_change":"OI변화율","volume":"거래량"}.get(key, key)
+    return {
+        "rsi":              "RSI",
+        "bollinger":        "볼린저밴드",
+        "funding_rate":     "펀딩비",
+        "long_short_ratio": "롱숏비율",
+        "taker_volume":     "Taker비율",
+        "volume":           "거래량",
+    }.get(key, key)
 
 
 def evaluate_signals(analysis: dict,
@@ -581,7 +576,7 @@ def _get_effective_cooldown(symbol: str, direction: str, current_price: float) -
     state = _load_state()
     last_price = state.get(f"{symbol}_{direction}_last_price", 0)
     if not last_price: return config.SIGNAL_COOLDOWN_MINUTES
-    change_pct      = (current_price - last_price) / last_price
+    change_pct       = (current_price - last_price) / last_price
     directional_move = change_pct if direction == "long" else -change_pct
     if directional_move >= config.PRICE_MOVE_SUPPRESS_STRONG: return config.COOLDOWN_SUPPRESSED_STRONG
     if directional_move >= config.PRICE_MOVE_SUPPRESS_MILD:   return config.COOLDOWN_SUPPRESSED_MILD
@@ -624,14 +619,6 @@ def _save_prev_regime(symbol: str, regime_name: str) -> None:
 
 def run_scoring_pipeline(symbol: str, analysis: dict,
                           market_data: dict = None) -> dict:
-    """
-    점수 산출 + 알림 여부 결정.
-
-    Args:
-        symbol:      "BTC/USDT" 등
-        analysis:    analysis_engine.run_full_analysis() 반환값
-        market_data: data_pipeline.collect() 반환값 (마이크로구조 패널티 활성화)
-    """
     import datetime as dt
     logger.info(f"{'─'*50}")
     logger.info(f"🎯 점수 산출: {symbol}")
