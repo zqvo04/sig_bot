@@ -1,16 +1,21 @@
 """
-analysis_engine.py — 분석 엔진
-[이번 변경]
-- analyze_oi_change 제거:
-    /rubik/stat/contracts/open-interest-history 400 오류 지속,
-    항상 neutral(50) 반환으로 신호 가치 없음 → 완전 제거
-    run_full_analysis에서 "oi_change": {"available": False} 스텁 반환 유지 (하위 호환)
-- Hidden Divergence (추세 지속 확증) 유지
-- analyze_mtf_rsi: pullback_long_weak / _micro 플래그 명시 반환
-- analyze_market_structure: 스윙 임계값 0.5%
-- analyze_vol_price_divergence: 임계값 0.5%+50%
+analysis_engine.py — 분석 엔진 (v3.3)
+[v3.3 변경]
+- check_volume_confirmation: 스코어 스케일 정규화
+    기존: 평균 거래량(1.0x) = 20pt → 항상 낮은 점수, 가중치 dead weight
+    수정: 평균 거래량(1.0x) = 50pt → 다른 지표와 동일한 중립 기준
+    공식: ratio≤0.5: 0~25pt / 0.5~1.0: 25~50pt / 1.0~1.5: 50~70pt
+          1.5~2.5: 70~90pt / 2.5+: 90~100pt
+    기본 반환값도 50.0pt로 변경 (데이터 없을 때 중립 처리)
+- evaluate_gates: 단일 불리 패널티 추가 (GATE_PENALTY_SINGLE = 0.92)
+    기존: 펀딩비 AND 롱숏 둘 다 불리해야 ×0.80 (거의 발동 안 함)
+    수정: 하나만 불리 → ×0.92, 둘 다 불리 → ×0.80
+
+[이전 변경]
+- analyze_oi_change 제거 (API 400 오류 지속)
+- Hidden Divergence 유지
+- analyze_mtf_rsi: pullback 플래그 명시
 - detect_fvg, detect_bos_choch, check_fibonacci_levels 유지
-- [Fix Issue 1] calculate_ema_multiplier: regime 파라미터 추가
 """
 import logging
 from typing import Optional
@@ -50,29 +55,57 @@ def get_atr_state(df: pd.DataFrame) -> dict:
 
 
 def check_volume_confirmation(df: pd.DataFrame) -> dict:
+    """
+    [v3.3] Volume 스코어 스케일 정규화
+    기존: 1.0x(평균) = 20pt → 다른 지표(50pt=중립)와 스케일 불일치
+    수정: 1.0x(평균) = 50pt → 가중치가 실질적으로 작동하도록 정규화
+
+    공식:
+      ratio ≤ 0.5:         0 ~ 25pt  (거래량 매우 낮음)
+      0.5 < ratio ≤ 1.0:  25 ~ 50pt (평균 미달, ratio=1.0 → 50pt)
+      1.0 < ratio ≤ 1.5:  50 ~ 70pt (평균 이상, confirmed 근처)
+      1.5 < ratio ≤ 2.5:  70 ~ 90pt (spike, confirmed)
+      ratio > 2.5:         90 ~100pt (strong spike)
+    """
     lb = config.VOLUME_CONFIRM_LOOKBACK
+    _empty = {"confirmed":False,"strong":False,"ratio":0.0,"score":50.0,
+              "current_vol":0.0,"avg_vol":0.0}
     if df is None or len(df) < lb+1:
-        return {"confirmed":False,"strong":False,"ratio":0.0,"score":0.0,"current_vol":0.0,"avg_vol":0.0}
+        return _empty
     cur_vol = float(df["volume"].iloc[-1])
     avg_vol = float(df["volume"].iloc[-(lb+1):-1].mean())
     if avg_vol <= 0:
-        return {"confirmed":False,"strong":False,"ratio":0.0,"score":0.0,"current_vol":0.0,"avg_vol":0.0}
+        return _empty
+
     ratio     = cur_vol / avg_vol
-    confirmed = ratio >= config.VOLUME_SPIKE_MULTIPLIER
-    strong    = ratio >= config.VOLUME_STRONG_MULTIPLIER
-    if ratio < 1.0:                             score = ratio * 20
-    elif ratio < config.VOLUME_SPIKE_MULTIPLIER:
-        score = 20+(ratio-1.0)/(config.VOLUME_SPIKE_MULTIPLIER-1.0)*30
-    elif ratio < config.VOLUME_STRONG_MULTIPLIER:
-        score = 50+(ratio-config.VOLUME_SPIKE_MULTIPLIER)/(config.VOLUME_STRONG_MULTIPLIER-config.VOLUME_SPIKE_MULTIPLIER)*30
+    confirmed = ratio >= config.VOLUME_SPIKE_MULTIPLIER   # ≥1.5x
+    strong    = ratio >= config.VOLUME_STRONG_MULTIPLIER  # ≥2.5x
+
+    if ratio <= 0:
+        score = 0.0
+    elif ratio <= 0.5:
+        score = (ratio / 0.5) * 25.0                          # 0~25pt
+    elif ratio <= 1.0:
+        score = 25.0 + ((ratio - 0.5) / 0.5) * 25.0          # 25~50pt
+    elif ratio <= 1.5:
+        score = 50.0 + ((ratio - 1.0) / 0.5) * 20.0          # 50~70pt
+    elif ratio <= 2.5:
+        score = 70.0 + ((ratio - 1.5) / 1.0) * 20.0          # 70~90pt
     else:
-        score = min(100, 80+(ratio-config.VOLUME_STRONG_MULTIPLIER)*10)
-    return {"confirmed":confirmed,"strong":strong,"ratio":round(ratio,3),"score":round(min(100,max(0,score)),2),
-            "current_vol":round(cur_vol,2),"avg_vol":round(avg_vol,2)}
+        score = min(100.0, 90.0 + (ratio - 2.5) * 4.0)       # 90~100pt
+
+    return {
+        "confirmed":   confirmed,
+        "strong":      strong,
+        "ratio":       round(ratio, 3),
+        "score":       round(min(100.0, max(0.0, score)), 2),
+        "current_vol": round(cur_vol, 2),
+        "avg_vol":     round(avg_vol, 2),
+    }
 
 
 # ══════════════════════════════════════════════
-# 2. 멀티TF RSI + 다이버전스 (일반 + Hidden)
+# 2. 멀티TF RSI + 다이버전스
 # ══════════════════════════════════════════════
 
 def calculate_rsi(df: pd.DataFrame, period: int = None) -> pd.Series:
@@ -290,7 +323,7 @@ def _empty_bb() -> dict:
 
 
 # ══════════════════════════════════════════════
-# A: EMA 교차 → 배율 계산  [Fix Issue 1]
+# 4. EMA 교차 → 배율 계산
 # ══════════════════════════════════════════════
 
 def _calc_ema(series: pd.Series, period: int) -> pd.Series:
@@ -426,7 +459,7 @@ def analyze_long_short_ratio(ls_data: dict, regime_name: str = "RANGING") -> dic
 
 
 # ══════════════════════════════════════════════
-# F: Taker Volume
+# 8. Taker Volume
 # ══════════════════════════════════════════════
 
 def analyze_taker_volume(taker_data: dict) -> dict:
@@ -453,7 +486,7 @@ def analyze_taker_volume(taker_data: dict) -> dict:
 
 
 # ══════════════════════════════════════════════
-# E: 강제청산 프록시
+# 9. 강제청산 프록시
 # ══════════════════════════════════════════════
 
 def analyze_liquidations(liq_data: dict, df_15m=None) -> dict:
@@ -505,12 +538,12 @@ def analyze_liquidations(liq_data: dict, df_15m=None) -> dict:
 
 
 # ══════════════════════════════════════════════
-# H: 시장 국면 분류
+# 10. 시장 국면 분류
 # ══════════════════════════════════════════════
 
 def classify_market_regime(df_15m: pd.DataFrame, adx: dict, bb: dict) -> dict:
     if df_15m is None or len(df_15m)<25 or not bb.get("available"):
-        return {"regime":"UNKNOWN","threshold":60,"description":"데이터 부족","icon":"❓"}
+        return {"regime":"UNKNOWN","threshold":63,"description":"데이터 부족","icon":"❓"}
     adx_val=adx.get("adx",0.0); bw=bb.get("band_width",0.0); avg_bw=bb.get("avg_band_width",bw)
     squeeze=bb.get("squeeze",False); bw_ratio=bw/avg_bw if avg_bw>0 else 1.0
     ma20_cross_count=0; efficiency_ratio=1.0
@@ -537,7 +570,7 @@ def classify_market_regime(df_15m: pd.DataFrame, adx: dict, bb: dict) -> dict:
         regime="TRENDING"; desc=f"ADX추세({adx_val:.0f}) — 추세 진행 중"; icon="📈"
     else:
         regime="RANGING"; desc=f"ADX낮음({adx_val:.0f})+BB평행 — 박스권 횡보"; icon="↔️"
-    threshold=config.REGIME_THRESHOLDS.get(regime,60)
+    threshold=config.REGIME_THRESHOLDS.get(regime, 63)
     logger.info(f"[국면] {icon} {regime} — {desc} (임계값:{threshold}pt)")
     return {"regime":regime,"threshold":threshold,"description":desc,"icon":icon,
             "adx":adx_val,"bw_ratio":round(bw_ratio,3),"squeeze":squeeze,
@@ -545,22 +578,49 @@ def classify_market_regime(df_15m: pd.DataFrame, adx: dict, bb: dict) -> dict:
 
 
 # ══════════════════════════════════════════════
-# 9. 게이팅
+# 11. 게이팅 [v3.3: 단일 불리 패널티 추가]
 # ══════════════════════════════════════════════
 
 def evaluate_gates(direction: str, funding: dict, ls_ratio_result: dict) -> dict:
-    funding_bias=funding.get("bias","neutral"); ls_bias=ls_ratio_result.get("bias","neutral")
-    penalty_factor=1.0; penalty_reason=None
-    if direction=="long":
-        fa=funding_bias=="short_favorable"; la=ls_bias in ("short_favorable","short_extreme")
+    """
+    [v3.3] 단일 지표 불리 패널티 추가
+    기존: 펀딩비 AND 롱숏 둘 다 불리해야만 ×0.80 → 발화 희소
+    수정:
+      하나만 불리 → ×0.92 (mild, GATE_PENALTY_SINGLE)
+      둘 다 불리  → ×0.80 (강,  GATE_PENALTY_DUAL)
+    """
+    funding_bias = funding.get("bias", "neutral")
+    ls_bias      = ls_ratio_result.get("bias", "neutral")
+    penalty_factor = 1.0; penalty_reason = None
+
+    if direction == "long":
+        fr_bad = (funding_bias == "short_favorable")
+        ls_bad = (ls_bias in ("short_favorable", "short_extreme"))
     else:
-        fa=funding_bias=="long_favorable";  la=ls_bias in ("long_favorable","long_extreme")
-    if fa and la:
-        penalty_factor=0.80; penalty_reason=f"펀딩비·롱숏비율 모두 {direction} 불리 — 점수 80% 적용"
-        logger.info(f"[Gate] ⚠️ {direction.upper()} 복합 페널티")
+        fr_bad = (funding_bias == "long_favorable")
+        ls_bad = (ls_bias in ("long_favorable", "long_extreme"))
+
+    if fr_bad and ls_bad:
+        penalty_factor = config.GATE_PENALTY_DUAL
+        penalty_reason = f"펀딩비·롱숏비율 모두 {direction} 불리 — 복합 패널티 ×{penalty_factor}"
+        logger.info(f"[Gate] ⚠️ {direction.upper()} 복합 패널티 (둘 다 불리)")
+    elif fr_bad:
+        penalty_factor = config.GATE_PENALTY_SINGLE
+        penalty_reason = f"펀딩비 {direction} 불리 — 단일 패널티 ×{penalty_factor}"
+        logger.info(f"[Gate] ⚠️ {direction.upper()} 펀딩비 불리 패널티")
+    elif ls_bad:
+        penalty_factor = config.GATE_PENALTY_SINGLE
+        penalty_reason = f"롱숏비율 {direction} 불리 — 단일 패널티 ×{penalty_factor}"
+        logger.info(f"[Gate] ⚠️ {direction.upper()} 롱숏비율 불리 패널티")
     else:
         logger.info(f"[Gate] ✅ {direction.upper()} 통과")
-    return {"passed":True,"funding_penalty":penalty_factor,"block_reason":None,"penalty_reason":penalty_reason}
+
+    return {
+        "passed":          True,
+        "funding_penalty": penalty_factor,
+        "block_reason":    None,
+        "penalty_reason":  penalty_reason,
+    }
 
 
 # ══════════════════════════════════════════════
@@ -762,7 +822,7 @@ def analyze_vol_price_divergence(df: pd.DataFrame) -> dict:
 
 
 # ══════════════════════════════════════════════
-# 10. 전체 분석 통합
+# 전체 분석 통합
 # ══════════════════════════════════════════════
 
 def run_full_analysis(symbol: str, collected_data: dict) -> dict:
@@ -776,7 +836,6 @@ def run_full_analysis(symbol: str, collected_data: dict) -> dict:
     ls_raw       = collected_data.get("ls_ratio", {})
     taker_raw    = collected_data.get("taker_volume", {})
     liq_raw      = collected_data.get("liquidations", {})
-    # oi_change 수집 안 함 — API 400 오류 지속, 항상 neutral 반환으로 제거
 
     df_15m = ohlcv.get("15m")
     df_1h  = ohlcv.get("1h")
@@ -787,9 +846,7 @@ def run_full_analysis(symbol: str, collected_data: dict) -> dict:
     adx_15m = calculate_adx(df_15m)
     adx_1h  = calculate_adx(df_1h)
     funding = analyze_funding_rate(funding_data)
-
-    # 국면 확정을 EMA 계산 전에 수행 (Fix Issue 1)
-    regime      = classify_market_regime(df_15m, adx_15m, bb)
+    regime  = classify_market_regime(df_15m, adx_15m, bb)
     regime_name = regime.get("regime", "UNKNOWN")
 
     ls_ratio = analyze_long_short_ratio(ls_raw, regime_name)
@@ -817,8 +874,8 @@ def run_full_analysis(symbol: str, collected_data: dict) -> dict:
         f"4h:{rsi.get('value_4h') or '-'} [{rsi['state']}] | "
         f"BB:{bb['state']}(%B={bb['pct_b']:.2f}) | "
         f"ADX:{adx_15m['adx']:.1f}[{adx_15m['strength']}] | "
-        f"국면:{regime_name} | Taker:{taker.get('bias','?')} | "
-        f"청산:{liq.get('signal','none')}"
+        f"국면:{regime_name} | Vol:{vol['ratio']:.2f}x({vol['score']:.0f}pt) | "
+        f"Taker:{taker.get('bias','?')} | 청산:{liq.get('signal','none')}"
     )
     if bos_choch.get("bos_bullish") or bos_choch.get("bos_bearish"):
         logger.info(f"  BOS: 상승={bos_choch['bos_bullish']} 하락={bos_choch['bos_bearish']}")
@@ -836,7 +893,7 @@ def run_full_analysis(symbol: str, collected_data: dict) -> dict:
         "adx_1h":           adx_1h,
         "funding_rate":     funding,
         "ls_ratio":         ls_ratio,
-        "oi_change":        {"available": False},  # ❌ 제거됨 — 하위 호환성 스텁
+        "oi_change":        {"available": False},
         "taker_volume":     taker,
         "liquidations":     liq,
         "volume":           vol,
