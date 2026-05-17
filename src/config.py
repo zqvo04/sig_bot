@@ -32,6 +32,15 @@ config.py — 전역 설정 (v3.3)
    기존: 펀딩비 AND 롱숏 둘 다 불리 → ×0.80
    수정: 하나만 불리 → ×0.92(mild)  /  둘 다 불리 → ×0.80(강)
 
+⑤ 거래량 페널티 추가 (v3.3 patch)
+   배경: volume 가중치 5~9%로 낮아 0pt여도 raw_score 억제 ~2.5~4.5pt에 불과.
+         보너스 하나(+4pt~)로 쉽게 상쇄 → 저거래량 신호 과다 발생.
+   수정: vol score 기준 명시적 덧셈 페널티 추가.
+     score <  5pt (ratio <  10%) → -7pt  (사실상 거래 없음)
+     score < 15pt (ratio <  30%) → -3pt  (평균 30% 미달)
+     score ≥ 15pt                →  0pt  (정상 범위)
+   적용 위치: final_score = (base+bonus)×soft + micro_penalty + volume_penalty
+
 [v3.2] BOS_CONFLICT_PENALTY = 0.82, PRICE_MOVE_RESET_THRESHOLD = -0.025
 [v3.1] OI 완전 제거
 [v3]   ADX 배율 통합, EMA 배율 정비, 보너스 18개 정리
@@ -258,6 +267,16 @@ GATE_PENALTY_DUAL   = 0.80   # 둘 다 불리 (기존 유일 패널티)
 
 OI_SPIKE_THRESHOLD     = 0.80  # 하위 호환용
 OI_SPIKE_SCORE_PENALTY = 20
+
+# 거래량 페널티 [v3.3 patch]
+# vol score 기준 명시적 덧셈 페널티:
+#   score <  5pt (ratio <  10%) → -7pt  사실상 거래 없음
+#   score < 15pt (ratio <  30%) → -3pt  평균 30% 미달
+#   score ≥ 15pt                →  0pt  정상 범위
+VOLUME_PENALTY_LOW_THRESHOLD = 5    # score < 5pt
+VOLUME_PENALTY_MID_THRESHOLD = 15   # score < 15pt
+VOLUME_PENALTY_LOW = -7
+VOLUME_PENALTY_MID = -3
 
 # ══════════════════════════════════════════════════════════════
 # SMC / 피보나치
