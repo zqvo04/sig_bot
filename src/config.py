@@ -4,46 +4,41 @@ config.py — 전역 설정 (v3.3)
 [v3.3 개선]
 
 ① SIGNAL_MIN_SCORE 제거
-   기존: regime_threshold(58/60/62/63)와 SIGNAL_MIN_SCORE(63)의 AND 조건
-         → 실질 max(regime,63) = 모든 국면 63pt, 국면별 임계값 무력화
-         → 알림 메시지 "임계:58pt"가 실제 동작과 달라 투명성 훼손
+   기존: regime_threshold와 SIGNAL_MIN_SCORE(63)의 AND 조건
+         → 실질 max(regime,63), 국면별 임계값 무력화
    수정: SIGNAL_MIN_SCORE 완전 제거, regime_threshold 단독 사용
    신규 임계값: SQUEEZE 65 / EXPLOSIVE 65 / TRENDING 63 / RANGING 62
-   설계 원칙: 리스크 ∝ 임계값
-     SQUEEZE/EXPLOSIVE → 65pt (페이크아웃/고변동성)
-     TRENDING          → 63pt (구조 확인 수준)
-     RANGING           → 62pt (BOS 패널티가 노이즈 필터링)
 
 ② Volume 가중치 재조정
-   배경: analysis_engine에서 volume 스코어 1.0x=50pt 정규화 후
-         평균 거래량이 ~50pt를 기여 → 기존보다 평균 +3~5pt 상승 예상
-   대응: volume 가중치 하향, 핵심 지표(taker/rsi/bb)에 재분배
-   RANGING:   vol 0.11→0.07  rsi +0.02  bb +0.02
-   TRENDING:  vol 0.14→0.09  taker +0.03  ls +0.02
-   EXPLOSIVE: vol 0.17→0.10  taker +0.05  ls +0.02
-   SQUEEZE:   vol 0.08→0.05  bb +0.02  taker +0.01
-   DEFAULT:   vol 0.05→0.04  taker +0.01
+   volume 가중치 하향, 핵심 지표(taker/rsi/bb)에 재분배
+   RANGING: vol 0.11→0.07 / TRENDING: vol 0.14→0.09
+   EXPLOSIVE: vol 0.17→0.10 / SQUEEZE: vol 0.08→0.05
 
 ③ 보너스 밸런스
-   FAILED_BREAKOUT: 14→12pt (단독 최고값 해소, PULLBACK_ENTRY와 동일)
-   BOS_CONFIRM:      6→ 8pt (구조 확증 중요도 반영)
+   FAILED_BREAKOUT: 14→12pt / BOS_CONFIRM: 6→8pt
 
 ④ Gate 단일 패널티 추가 (GATE_PENALTY_SINGLE = 0.92)
-   기존: 펀딩비 AND 롱숏 둘 다 불리 → ×0.80
-   수정: 하나만 불리 → ×0.92(mild)  /  둘 다 불리 → ×0.80(강)
+   하나만 불리 → ×0.92 / 둘 다 불리 → ×0.80
 
 ⑤ 거래량 페널티 추가 (v3.3 patch)
-   배경: volume 가중치 5~9%로 낮아 0pt여도 raw_score 억제 ~2.5~4.5pt에 불과.
-         보너스 하나(+4pt~)로 쉽게 상쇄 → 저거래량 신호 과다 발생.
-   수정: vol score 기준 명시적 덧셈 페널티 추가.
-     score <  5pt (ratio <  10%) → -7pt  (사실상 거래 없음)
-     score < 15pt (ratio <  30%) → -3pt  (평균 30% 미달)
-     score ≥ 15pt                →  0pt  (정상 범위)
-   적용 위치: final_score = (base+bonus)×soft + micro_penalty + volume_penalty
+   volume 가중치 5~9%로 낮아 보너스 하나로 상쇄 가능.
+   vol score 기준 명시적 덧셈 페널티 추가:
+     score <  5pt (ratio <  10%) → -7pt
+     score < 15pt (ratio <  30%) → -3pt
+     score ≥ 15pt                →  0pt
 
-[v3.2] BOS_CONFLICT_PENALTY = 0.82, PRICE_MOVE_RESET_THRESHOLD = -0.025
+⑥ Volume 기준 캔들 및 lookback 개선 (v3.3 patch)
+   문제 ①: 신호는 항상 새 15분봉 시작 시점 → iloc[-1]은 방금 열린 캔들
+            (거래량 ≈ 0) → ratio가 구조적으로 낮게 산출되는 버그
+   문제 ②: lookback 20개(5시간)는 스파이크 오염 취약 + 주말/평일 패턴 미반영
+   수정:
+     - 비교 기준: iloc[-1](진행 중) → iloc[-2](직전 완성 캔들)
+     - lookback: 20 → 48 (5시간 → 12시간)
+     - CANDLE_LIMITS["15m"]=100 기준 버퍼 50개 확보 → 안전
+
+[v3.2] BOS_CONFLICT_PENALTY = 0.82
 [v3.1] OI 완전 제거
-[v3]   ADX 배율 통합, EMA 배율 정비, 보너스 18개 정리
+[v3]   ADX 배율 통합, EMA 배율 정비
 """
 import os
 
@@ -78,7 +73,10 @@ ADX_NO_TREND    = 20
 ADX_WEAK_TREND  = 25
 ADX_STRONG      = 50
 
-VOLUME_CONFIRM_LOOKBACK   = 20
+# [v3.3 patch ⑥] 20(5시간) → 48(12시간)
+# 비교 기준: 직전 완성 캔들(iloc[-2]) vs 직전 48개 완성 캔들 평균(iloc[-50:-2])
+# CANDLE_LIMITS["15m"]=100 → 버퍼 50개 확보
+VOLUME_CONFIRM_LOOKBACK   = 48
 VOLUME_SPIKE_MULTIPLIER   = 1.5   # confirmed 기준 → 점수 70pt+
 VOLUME_STRONG_MULTIPLIER  = 2.5   # strong 기준    → 점수 90pt+
 
@@ -129,57 +127,52 @@ REGIME_TREND_ADX     = 25
 REGIME_STRONG_ADX    = 40
 
 # ══════════════════════════════════════════════════════════════
-# 국면별 가중치 — v3.3: volume 가중치 하향 + 핵심 지표 재분배
+# 국면별 가중치
 # ══════════════════════════════════════════════════════════════
 
-# DEFAULT
 SCORE_WEIGHTS = {
     "rsi":              0.25,
     "bollinger":        0.20,
     "funding_rate":     0.19,
     "long_short_ratio": 0.14,
-    "taker_volume":     0.18,  # +0.01
-    "volume":           0.04,  # -0.01
+    "taker_volume":     0.18,
+    "volume":           0.04,
 }
 
-# RANGING: 평균 회귀 — RSI/BB 핵심, vol 보조
 SCORE_WEIGHTS_RANGING = {
-    "rsi":              0.32,  # +0.02
-    "bollinger":        0.26,  # +0.02
+    "rsi":              0.32,
+    "bollinger":        0.26,
     "funding_rate":     0.13,
     "long_short_ratio": 0.12,
     "taker_volume":     0.10,
-    "volume":           0.07,  # -0.04
+    "volume":           0.07,
 }
 
-# TRENDING: 추세 추종 — order flow(Taker/LS) 최우선
 SCORE_WEIGHTS_TRENDING = {
     "rsi":              0.11,
     "bollinger":        0.09,
     "funding_rate":     0.15,
-    "long_short_ratio": 0.22,  # +0.02
-    "taker_volume":     0.34,  # +0.03
-    "volume":           0.09,  # -0.05
+    "long_short_ratio": 0.22,
+    "taker_volume":     0.34,
+    "volume":           0.09,
 }
 
-# EXPLOSIVE: 폭발적 움직임 — 실시간 order flow 최우선
 SCORE_WEIGHTS_EXPLOSIVE = {
     "rsi":              0.07,
     "bollinger":        0.06,
     "funding_rate":     0.15,
-    "long_short_ratio": 0.24,  # +0.02
-    "taker_volume":     0.38,  # +0.05
-    "volume":           0.10,  # -0.07
+    "long_short_ratio": 0.24,
+    "taker_volume":     0.38,
+    "volume":           0.10,
 }
 
-# SQUEEZE: 스퀴즈 돌파 — BB 최우선, taker 방향 확인
 SCORE_WEIGHTS_SQUEEZE = {
     "rsi":              0.15,
-    "bollinger":        0.35,  # +0.02
+    "bollinger":        0.35,
     "funding_rate":     0.13,
     "long_short_ratio": 0.13,
-    "taker_volume":     0.19,  # +0.01
-    "volume":           0.05,  # -0.03
+    "taker_volume":     0.19,
+    "volume":           0.05,
 }
 
 REGIME_SCORE_WEIGHTS = {
@@ -191,7 +184,7 @@ REGIME_SCORE_WEIGHTS = {
 }
 
 # ══════════════════════════════════════════════════════════════
-# 보너스 체계 (v3.3)
+# 보너스 체계
 # ══════════════════════════════════════════════════════════════
 
 BONUS_PULLBACK_ENTRY       = 12
@@ -203,12 +196,12 @@ BONUS_TREND_STRONG = 12
 BONUS_BB_RSI_ALIGN         = 8
 BONUS_LIQUIDATION          = 10
 BONUS_VOL_PRICE_DIV        = 10
-BONUS_FAILED_BREAKOUT      = 12   # [v3.3] 14→12
+BONUS_FAILED_BREAKOUT      = 12
 BONUS_EXTREME_OVERSOLD_MTF = 10
 
 BONUS_FVG_ENTRY            = 8
 BONUS_FVG_ENTRY_CONFLICTED = 4
-BONUS_BOS_CONFIRM          = 8    # [v3.3]  6→8
+BONUS_BOS_CONFIRM          = 8
 BONUS_FIB_GOLDEN_POCKET    = 10
 BONUS_FIB_KEY_LEVEL        = 5
 
@@ -254,27 +247,23 @@ EXPLOSIVE_EXHAUSTION_RSI_LONG  = 70
 EXPLOSIVE_EXHAUSTION_RSI_SHORT = 30
 EXPLOSIVE_EXHAUSTION_PENALTY   = 0.88
 
-CHOCH_AGAINST_PENALTY = 0.88   # CHoCH: 추세 전환 "경고"
-BOS_CONFLICT_PENALTY  = 0.82   # BOS:   추세 방향 "확증" — CHoCH보다 강함
+CHOCH_AGAINST_PENALTY = 0.88
+BOS_CONFLICT_PENALTY  = 0.82
 
 CANDLE_MOMENTUM_PENALTY_RANGING   = 0.80
 CANDLE_MOMENTUM_PENALTY_EXPLOSIVE  = 0.85
 CANDLE_MOMENTUM_PENALTY_TRENDING   = 0.90
 
-# Gate 패널티 [v3.3]
-GATE_PENALTY_SINGLE = 0.92   # 펀딩비 OR 롱숏 하나만 불리
-GATE_PENALTY_DUAL   = 0.80   # 둘 다 불리 (기존 유일 패널티)
+# Gate 패널티
+GATE_PENALTY_SINGLE = 0.92
+GATE_PENALTY_DUAL   = 0.80
 
 OI_SPIKE_THRESHOLD     = 0.80  # 하위 호환용
 OI_SPIKE_SCORE_PENALTY = 20
 
-# 거래량 페널티 [v3.3 patch]
-# vol score 기준 명시적 덧셈 페널티:
-#   score <  5pt (ratio <  10%) → -7pt  사실상 거래 없음
-#   score < 15pt (ratio <  30%) → -3pt  평균 30% 미달
-#   score ≥ 15pt                →  0pt  정상 범위
-VOLUME_PENALTY_LOW_THRESHOLD = 5    # score < 5pt
-VOLUME_PENALTY_MID_THRESHOLD = 15   # score < 15pt
+# 거래량 페널티 [v3.3 patch ⑤]
+VOLUME_PENALTY_LOW_THRESHOLD = 5    # score <  5pt → -7pt
+VOLUME_PENALTY_MID_THRESHOLD = 15   # score < 15pt → -3pt
 VOLUME_PENALTY_LOW = -7
 VOLUME_PENALTY_MID = -3
 
@@ -292,7 +281,7 @@ VOL_DIV_BEAR_VOLUME_RATIO = 0.67
 MARKET_STRUCT_SWING_THRESHOLD = 0.005
 
 # ══════════════════════════════════════════════════════════════
-# 신호 임계값 (v3.3: SIGNAL_MIN_SCORE 제거, 국면별 단독 운용)
+# 신호 임계값
 # ══════════════════════════════════════════════════════════════
 REGIME_THRESHOLDS = {
     "SQUEEZE":   65,
@@ -300,7 +289,6 @@ REGIME_THRESHOLDS = {
     "RANGING":   62,
     "EXPLOSIVE": 65,
 }
-# SIGNAL_MIN_SCORE 제거됨 (v3.3) — regime_threshold 단독 사용
 
 # ══════════════════════════════════════════════════════════════
 # 동적 쿨다운
