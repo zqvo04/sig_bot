@@ -1,11 +1,29 @@
 """
-notification.py — 텔레그램 알림 (v3.1 + micro v2.4)
+notification.py — 텔레그램 알림 (v3.3)
 ──────────────────────────────────────────────────────────────────────────────
-[v3.1 기준 유지, micro v2.4 업데이트]
-- _micro_label: BBCompat 제거, OBImbalance/CandleMom 추가
-- OI 레짐 키워드: ACCUMULATION/SHORT_BUILDUP/SHORT_SQUEEZE/LONG_LIQUIDATION
-- OI 변화율 섹션 제거 유지 (available 항상 False)
-- label_map: oi_change 제거 유지
+[v3.3 변경]
+
+★ BOS 역방향 패널티 표시 추가
+  scoring_system v3.2에서 추가된 bos_conflict_penalty(×0.82)가
+  알림에 반영되지 않던 문제 수정.
+  지표별 점수 섹션에 "⚠️ BOS 역방향 패널티: ×0.82" 표시.
+  SMC 섹션에 "⛔ 역방향 BOS 패널티 ×0.82 적용됨" 메시지 추가.
+
+★ adx_multiplier 데드코드 제거
+  scoring_system에서 adx_multiplier는 항상 1.0으로 반환됨.
+  notification에서 "ADX횡보 배율: ×..." 줄은 절대 표시 불가 → 제거.
+
+★ OI 관련 섹션 제거
+  - _micro_label: "OIVelocity" 항목 제거
+  - OI 레짐 태그 표시 블록 제거 (ACCUMULATION/SHORT_BUILDUP 등)
+  - 방안 번호 재정리 반영 (6개 방안 / 5개 데이터)
+
+★ label_map: "oi_change" 항목 유지 불필요 → 제거됨
+  (analysis 반환 dict에서도 oi_change는 available:False 고정)
+
+[이전]
+v3.1: OI 변화율 섹션 제거
+v3.0: 전체 리팩토링
 ──────────────────────────────────────────────────────────────────────────────
 """
 import logging, time
@@ -26,29 +44,36 @@ _TG_BASE = "https://api.telegram.org/bot{token}/{method}"
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _send_telegram(method, payload, retries=3):
-    if not config.TELEGRAM_BOT_TOKEN: return None
+    if not config.TELEGRAM_BOT_TOKEN:
+        return None
     url = _TG_BASE.format(token=config.TELEGRAM_BOT_TOKEN, method=method)
     for attempt in range(1, retries + 1):
         try:
             r = requests.post(url, json=payload, timeout=10)
             if r.status_code == 200:
                 d = r.json()
-                if d.get("ok"): return d
-                logger.error(f"[TG] API 오류: {d.get('description')}"); return None
+                if d.get("ok"):
+                    return d
+                logger.error(f"[TG] API 오류: {d.get('description')}")
+                return None
             elif r.status_code == 429:
                 time.sleep(int(r.headers.get("Retry-After", 5)))
             else:
                 time.sleep(3 * attempt)
         except Exception as e:
-            logger.error(f"[TG] 오류: {e}"); time.sleep(3 * attempt)
+            logger.error(f"[TG] 오류: {e}")
+            time.sleep(3 * attempt)
     return None
 
 
 def send_message(text, parse_mode="HTML"):
-    if not config.TELEGRAM_CHAT_ID: return None
+    if not config.TELEGRAM_CHAT_ID:
+        return None
     return _send_telegram("sendMessage", {
-        "chat_id": config.TELEGRAM_CHAT_ID, "text": text,
-        "parse_mode": parse_mode, "disable_web_page_preview": True,
+        "chat_id":                  config.TELEGRAM_CHAT_ID,
+        "text":                     text,
+        "parse_mode":               parse_mode,
+        "disable_web_page_preview": True,
     })
 
 
@@ -62,8 +87,10 @@ def _bar(score, width=10):
 
 
 def _fmt_price(price, symbol):
-    if price is None: return "N/A"
-    return f"${price:,.2f}" if any(s in symbol for s in ["BTC", "ETH"]) else f"${price:,.4f}"
+    if price is None:
+        return "N/A"
+    return (f"${price:,.2f}" if any(s in symbol for s in ["BTC", "ETH"])
+            else f"${price:,.4f}")
 
 
 def _calc_sl_tp(current_price, direction, atr_val, rr=2.0, atr_mult=1.5,
@@ -77,22 +104,23 @@ def _calc_sl_tp(current_price, direction, atr_val, rr=2.0, atr_mult=1.5,
         sl = ep - sl_dist; tp = ep + tp_dist
     else:
         sl = ep + sl_dist; tp = ep - tp_dist
-    return (round(sl, 4), round(tp, 4),
-            round(sl_dist / ep * 100, 2),
-            round(tp_dist / ep * 100, 2))
+    return (
+        round(sl, 4), round(tp, 4),
+        round(sl_dist / ep * 100, 2),
+        round(tp_dist / ep * 100, 2),
+    )
 
 
 def _micro_label(name: str) -> str:
-    """마이크로구조 방안 이름 → 한국어 라벨 (v2.4 업데이트)"""
+    """마이크로구조 방안 이름 → 한국어 라벨 (v3.3: OI 제거)"""
     return {
         "LiqCascade":   "청산캐스케이드",
         "OrderBook":    "오더북벽",
-        "OIVelocity":   "OI속도",
-        "OBImbalance":  "호가잔량불균형",   # ★ 신규 (방안 4 교체)
-        "CandleMom":    "캔들모멘텀",       # ★ 신규 (방안 5)
+        # OIVelocity 제거됨 (v3.3)
+        "OBImbalance":  "호가잔량불균형",
+        "CandleMom":    "캔들모멘텀",
         "MarkFunding":  "마크/펀딩",
         "LSDivergence": "LS괴리(고래)",
-        # BBCompat 제거됨 (v2.4)
     }.get(name, name)
 
 
@@ -115,38 +143,40 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     side_result = signals[direction]
     regime_info = pipeline_result.get("regime", {})
 
-    micro: dict       = pipeline_result.get("micro_result") or {}
-    micro_total       = micro.get("total_penalty", 0)
-    micro_raw         = micro.get("raw_total", micro_total)
-    micro_details     = micro.get("details", [])
-    micro_entry       = micro.get("suggested_entry")
-    micro_critical    = [d for d in micro_details if d[1] <= -10]
-    micro_bonus       = [d for d in micro_details if d[1] > 0]
+    micro: dict    = pipeline_result.get("micro_result") or {}
+    micro_total    = micro.get("total_penalty", 0)
+    micro_raw      = micro.get("raw_total", micro_total)
+    micro_details  = micro.get("details", [])
+    micro_entry    = micro.get("suggested_entry")
+    micro_critical = [d for d in micro_details if d[1] <= -10]
+    micro_bonus    = [d for d in micro_details if d[1] > 0]
 
-    rsi        = analysis.get("rsi",             {})
-    bb         = analysis.get("bollinger",        {})
-    ema        = analysis.get(f"ema_{direction}", {})
-    adx        = analysis.get("adx_15m",          {})
-    funding    = analysis.get("funding_rate",      {})
-    ls         = analysis.get("ls_ratio",          {})
-    taker      = analysis.get("taker_volume",      {})
-    liq        = analysis.get("liquidations",      {})
-    fvg        = analysis.get("fvg",               {})
-    bos_choch  = analysis.get("bos_choch",         {})
-    fibonacci  = analysis.get("fibonacci",         {})
-    atr        = analysis.get("atr",               {})
-    price      = analysis.get("current_price")
+    rsi       = analysis.get("rsi",          {})
+    bb        = analysis.get("bollinger",     {})
+    ema       = analysis.get(f"ema_{direction}", {})
+    adx       = analysis.get("adx_15m",      {})
+    funding   = analysis.get("funding_rate",  {})
+    ls        = analysis.get("ls_ratio",      {})
+    taker     = analysis.get("taker_volume",  {})
+    liq       = analysis.get("liquidations",  {})
+    fvg       = analysis.get("fvg",           {})
+    bos_choch = analysis.get("bos_choch",     {})
+    fibonacci = analysis.get("fibonacci",     {})
+    atr       = analysis.get("atr",           {})
+    price     = analysis.get("current_price")
+
     cs         = side_result.get("component_scores", {})
-    bonuses    = side_result.get("bonuses",         [])
-    gate       = side_result.get("gate_info",       {})
-    regime_thr = side_result.get("regime_threshold", 60)
+    bonuses    = side_result.get("bonuses",           [])
+    gate       = side_result.get("gate_info",         {})
+    regime_thr = side_result.get("regime_threshold",  63)
 
-    mtf_penalty       = side_result.get("mtf_penalty",          1.0)
-    exhaustion_mult   = side_result.get("exhaustion_mult",       1.0)
-    candle_momentum_m = side_result.get("candle_momentum_mult",  1.0)
-    choch_penalty     = side_result.get("choch_penalty",         1.0)
-    bonus_cap         = side_result.get("bonus_cap",             36)
-    bonus_total       = side_result.get("bonus_total",           0)
+    mtf_penalty        = side_result.get("mtf_penalty",         1.0)
+    exhaustion_mult    = side_result.get("exhaustion_mult",      1.0)
+    candle_momentum_m  = side_result.get("candle_momentum_mult", 1.0)
+    choch_penalty      = side_result.get("choch_penalty",        1.0)
+    bos_conflict_penalty = side_result.get("bos_conflict_penalty", 1.0)  # [v3.3]
+    bonus_cap          = side_result.get("bonus_cap",            36)
+    bonus_total        = side_result.get("bonus_total",          0)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = []
@@ -154,6 +184,7 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     same_count    = ema.get("same_count",    0)
     reverse_count = ema.get("reverse_count", 0)
 
+    # 등급
     if score >= 85:
         grade_icon, grade_label, grade_desc = "🔥🔥", "STRONG", "매우 강한 신호 — 즉시 대응 권장"
     elif score >= 72:
@@ -166,11 +197,13 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         grade_label = grade_label + "⚠"
         grade_desc  = grade_desc + " | 마이크로구조 경고 확인"
 
+    # EMA 정합
     if   same_count == 3: trend_align, trend_detail = "✅ 순방향 3/3", "3개 TF EMA 모두 신호 방향 일치"
     elif same_count == 2: trend_align, trend_detail = "✅ 순방향 2/3", "2개 TF EMA 신호 방향 일치"
     elif same_count == 1: trend_align, trend_detail = "⚠️ 부분 역방향 2/3", "상위 TF와 방향 불일치 — 주의"
     else:                 trend_align, trend_detail = "⚠️ 역방향 3/3", "모든 TF EMA가 반대 방향 — 역추세 진입"
 
+    # 눌림목
     pb_strong = rsi.get("pullback_long_strong"  if direction=="long" else "pullback_short_strong", False)
     pb_weak   = rsi.get("pullback_long_weak"    if direction=="long" else "pullback_short_weak",   False)
     pb_micro  = rsi.get("pullback_long_micro"   if direction=="long" else "pullback_short_micro",  False)
@@ -184,6 +217,7 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         elif pb_weak:  pullback_str = "  ★ 눌림목 숏(약) — 1h RSI 중립하(<48) + 15m 과열(>56)"
         elif pb_micro: pullback_str = "  ★ 눌림목 숏(미) — 1h RSI 최소조건 + 15m 소폭 과열(>55)"
 
+    # SMC 태그
     smc_tags = []
     if fvg.get("in_bullish_fvg" if direction=="long" else "in_bearish_fvg"):
         smc_tags.append("FVG")
@@ -193,6 +227,7 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         retr = fibonacci.get("long_retracement" if direction=="long" else "short_retracement")
         smc_tags.append(f"황금포켓({retr}%)" if retr else "황금포켓")
 
+    # ── 헤더 ──────────────────────────────────────────────────
     dir_icon = "🟢" if direction == "long" else "🔴"
     dir_text = "롱(LONG)" if direction == "long" else "숏(SHORT)"
     lines.append(f"{dir_icon} <b>{dir_text} 진입 신호</b>  {grade_icon} <b>{grade_label}</b>")
@@ -210,7 +245,7 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     lines.append(f"🕐 {now}")
     lines.append("")
 
-    # ── ATR 기반 SL/TP ─────────────────────────────────────────
+    # ── ATR 기반 SL/TP ────────────────────────────────────────
     atr_val = atr.get("current", 0.0)
     sl_price, tp_price, sl_pct, tp_pct = _calc_sl_tp(
         price, direction, atr_val, entry_price=micro_entry
@@ -219,7 +254,10 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         entry_note = ""
         if micro_entry and micro_entry != price:
             pct_diff = abs(micro_entry - price) / price * 100
-            entry_note = f"  <i>← OB벽 회피 ({pct_diff:.2f}% {'아래' if direction=='long' else '위'})</i>"
+            entry_note = (
+                f"  <i>← OB벽 회피 ({pct_diff:.2f}% "
+                f"{'아래' if direction=='long' else '위'})</i>"
+            )
         lines.append("📍 <b>진입 가이드</b>  <i>(ATR×1.5 기준, 참고용)</i>")
         lines.append(f"  💰 진입가: <b>{_fmt_price(micro_entry or price, symbol)}</b>{entry_note}")
         lines.append(f"  🛑 손절가: <b>{_fmt_price(sl_price, symbol)}</b>  (-{sl_pct}%)")
@@ -227,7 +265,7 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         lines.append(f"  📊 ATR: ${atr_val:,.2f}  ×{atr.get('ratio',1.0):.1f}배")
         lines.append("")
 
-    # ── 🔬 마이크로구조 필터 ────────────────────────────────────
+    # ── 🔬 마이크로구조 필터 ──────────────────────────────────
     if micro_details:
         cap_note = (f" → cap {micro_total:+d}pt" if micro_raw != micro_total else "")
         lines.append(f"🔬 <b>마이크로구조 필터</b>  합계:<b>{micro_raw:+d}pt</b>{cap_note}")
@@ -237,30 +275,18 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
             r_short = reason.replace("⚠️","").replace("✅","").strip()[:60]
             lines.append(f"  {icon} {label}: <b>{p:+d}pt</b>  <i>{r_short}</i>")
 
-        # OI 레짐 태그 표시
-        oi_vel = next((d for d in micro_details if d[0] == "OIVelocity"), None)
-        if oi_vel:
-            regime_tag = ""
-            for keyword, tag in [
-                ("ACCUMULATION",    "📈신규롱 축적"),
-                ("SHORT_BUILDUP",   "📉신규숏 진입"),
-                ("SHORT_SQUEEZE",   "⚠️숏스퀴즈"),
-                ("LONG_LIQUIDATION","⚠️롱청산 캐스케이드"),
-            ]:
-                if keyword in oi_vel[2]:
-                    regime_tag = tag; break
-            if regime_tag:
-                lines.append(f"  └ OI레짐: <b>{regime_tag}</b>")
-
-        # OB 잔량 불균형 요약 표시
+        # OB 잔량 불균형 요약
         obi = next((d for d in micro_details if d[0] == "OBImbalance"), None)
         if obi and obi[1] != 0:
             obi_icon = "🟢" if obi[1] > 0 else "🔴"
-            lines.append(f"  └ 호가잔량: {obi_icon} {obi[2].replace('✅','').replace('⚠️','').strip()[:45]}")
+            lines.append(
+                f"  └ 호가잔량: {obi_icon} "
+                f"{obi[2].replace('✅','').replace('⚠️','').strip()[:45]}"
+            )
 
         lines.append("")
 
-    # ── 시장 국면 ──────────────────────────────────────────────
+    # ── 시장 국면 ─────────────────────────────────────────────
     r_icon = regime_info.get("icon", "")
     r_name = regime_info.get("regime", "?")
     r_desc = regime_info.get("description", "")
@@ -268,7 +294,7 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     lines.append(f"   <i>{r_desc}</i>")
     lines.append("")
 
-    # ── 기술 지표 ──────────────────────────────────────────────
+    # ── 기술 지표 ─────────────────────────────────────────────
     lines.append("📈 <b>기술 지표</b>")
 
     rsi_val = rsi.get("value", 50.0)
@@ -299,9 +325,13 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     bb_tag = bb_map.get(bb.get("state", ""), "—")
     sq_s   = "  🔊 스퀴즈" if bb.get("squeeze") else ""
     sk_s   = ""
-    if bb.get("lower_streak", 0) >= 2: sk_s = f"  ⚠️하단이탈{bb['lower_streak']}캔들"
-    if bb.get("upper_streak", 0) >= 2: sk_s = f"  ⚠️상단이탈{bb['upper_streak']}캔들"
-    lines.append(f"  볼린저밴드: {bb_tag}  (%B:{bb.get('pct_b',0.5):.2f}){sq_s}{sk_s}")
+    if bb.get("lower_streak", 0) >= 2:
+        sk_s = f"  ⚠️하단이탈{bb['lower_streak']}캔들"
+    if bb.get("upper_streak", 0) >= 2:
+        sk_s = f"  ⚠️상단이탈{bb['upper_streak']}캔들"
+    lines.append(
+        f"  볼린저밴드: {bb_tag}  (%B:{bb.get('pct_b',0.5):.2f}){sq_s}{sk_s}"
+    )
 
     ema_tf   = ema.get("tf_signals", {})
     ema_mult = ema.get("multiplier", 1.0)
@@ -313,13 +343,18 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     ema_warn = "" if ema_mult == 1.0 else f"  ⚠️역방향{ema_rev}TF(×{ema_mult:.2f})"
     lines.append(f"  EMA교차  : [{ema_str}]{ema_warn}")
 
-    adx_map = {"strong": "🔥강한추세", "normal": "📈추세중", "weak": "〰약한추세", "none": "💤횡보"}
-    adx_m   = adx.get("multiplier", 1.0)
-    adx_s   = f"  ×{adx_m:.2f}배율적용" if adx_m < 1.0 else ""
-    lines.append(f"  ADX({config.ADX_PERIOD})  : <code>{adx.get('adx',0):.1f}</code>  {adx_map.get(adx.get('strength','none'),'—')}{adx_s}")
+    adx_map = {
+        "strong": "🔥강한추세", "normal": "📈추세중",
+        "weak":   "〰약한추세", "none":   "💤횡보",
+    }
+    lines.append(
+        f"  ADX({config.ADX_PERIOD})  : "
+        f"<code>{adx.get('adx',0):.1f}</code>  "
+        f"{adx_map.get(adx.get('strength','none'),'—')}"
+    )
     lines.append("")
 
-    # ── SMC / 구조 분석 ────────────────────────────────────────
+    # ── SMC / 구조 분석 ───────────────────────────────────────
     has_smc = (
         fvg.get("in_bullish_fvg") or fvg.get("in_bearish_fvg") or
         bos_choch.get("bos_bullish") or bos_choch.get("bos_bearish") or
@@ -329,10 +364,12 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     )
     if has_smc:
         lines.append("🏛 <b>SMC / 구조 분석</b>")
+
+        # FVG
         bull_fvg = fvg.get("in_bullish_fvg", False)
         bear_fvg = fvg.get("in_bearish_fvg", False)
         if bull_fvg and bear_fvg:
-            lines.append(f"  FVG      : ⚠️ 강세+약세 FVG 동시 — 방향 모호 구간 (각 보너스 ÷2 적용)")
+            lines.append("  FVG      : ⚠️ 강세+약세 FVG 동시 — 방향 모호 구간 (각 보너스 ÷2 적용)")
         elif bull_fvg:
             cnt = fvg.get("bullish_fvg_count", 0)
             lines.append(f"  FVG      : ✅ 강세 FVG 내부  (미충전 {cnt}개) — 기관 매수 주문 구간")
@@ -340,18 +377,43 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
             cnt = fvg.get("bearish_fvg_count", 0)
             lines.append(f"  FVG      : ✅ 약세 FVG 내부  (미충전 {cnt}개) — 기관 매도 주문 구간")
         else:
-            lines.append(f"  FVG      : — FVG 외부")
+            lines.append("  FVG      : — FVG 외부")
 
+        # BOS / CHoCH [v3.3: BOS 충돌 패널티 표시 추가]
         if bos_choch.get("bos_bullish"):
-            lines.append(f"  BOS/CHoCH: ✅ 상승 BOS 확증 — 스윙고점 돌파, 상승 추세 지속")
+            if direction == "short":
+                # 방향 충돌: 상승 BOS인데 숏 시그널
+                lines.append("  BOS/CHoCH: ✅ 상승 BOS 확증 — 스윙고점 돌파, 상승 추세 지속")
+                lines.append(
+                    f"    └ ⛔ 숏 진입과 역방향 — BOS 충돌 패널티 ×{bos_conflict_penalty:.2f} 적용됨"
+                )
+            else:
+                lines.append("  BOS/CHoCH: ✅ 상승 BOS 확증 — 스윙고점 돌파, 상승 추세 지속")
+
         elif bos_choch.get("bos_bearish"):
-            lines.append(f"  BOS/CHoCH: ✅ 하락 BOS 확증 — 스윙저점 이탈, 하락 추세 지속")
-        elif bos_choch.get("choch_bullish"):
-            lines.append(f"  BOS/CHoCH: ⚠️ 상승전환 CHoCH — 하락→상승 구조 전환 경고")
-        elif bos_choch.get("choch_bearish"):
-            lines.append(f"  BOS/CHoCH: ⚠️ 하락전환 CHoCH — 상승→하락 구조 전환 경고")
             if direction == "long":
-                lines.append(f"    └ ⛔ 롱 진입과 역방향 — CHoCH 패널티 ×{choch_penalty:.2f} 적용됨")
+                # 방향 충돌: 하락 BOS인데 롱 시그널
+                lines.append("  BOS/CHoCH: ✅ 하락 BOS 확증 — 스윙저점 이탈, 하락 추세 지속")
+                lines.append(
+                    f"    └ ⛔ 롱 진입과 역방향 — BOS 충돌 패널티 ×{bos_conflict_penalty:.2f} 적용됨"
+                )
+            else:
+                lines.append("  BOS/CHoCH: ✅ 하락 BOS 확증 — 스윙저점 이탈, 하락 추세 지속")
+
+        elif bos_choch.get("choch_bullish"):
+            lines.append("  BOS/CHoCH: ⚠️ 상승전환 CHoCH — 하락→상승 구조 전환 경고")
+            if direction == "short":
+                lines.append(
+                    f"    └ ⛔ 숏 진입과 역방향 — CHoCH 패널티 ×{choch_penalty:.2f} 적용됨"
+                )
+
+        elif bos_choch.get("choch_bearish"):
+            lines.append("  BOS/CHoCH: ⚠️ 하락전환 CHoCH — 상승→하락 구조 전환 경고")
+            if direction == "long":
+                lines.append(
+                    f"    └ ⛔ 롱 진입과 역방향 — CHoCH 패널티 ×{choch_penalty:.2f} 적용됨"
+                )
+
         else:
             last_sh = bos_choch.get("last_swing_high")
             last_sl = bos_choch.get("last_swing_low")
@@ -361,8 +423,9 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
                 if last_sl: parts.append(f"저점:{_fmt_price(last_sl, symbol)}")
                 lines.append(f"  BOS/CHoCH: — 구조 유지  ({', '.join(parts)})")
             else:
-                lines.append(f"  BOS/CHoCH: — 구조 분석 불충분")
+                lines.append("  BOS/CHoCH: — 구조 분석 불충분")
 
+        # 피보나치
         if direction == "long":
             if fibonacci.get("in_golden_pocket_long"):
                 retr = fibonacci.get("long_retracement", "?")
@@ -372,7 +435,10 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
                 lines.append(f"  피보나치  : ✅ 주요레벨 근접 {retr}% (38.2/50/78.6%)")
             else:
                 retr = fibonacci.get("long_retracement")
-                lines.append(f"  피보나치  : — 주요레벨 외부{f'  (현재 {retr}% 되돌림)' if retr else ''}")
+                lines.append(
+                    f"  피보나치  : — 주요레벨 외부"
+                    + (f"  (현재 {retr}% 되돌림)" if retr else "")
+                )
         else:
             if fibonacci.get("in_golden_pocket_short"):
                 retr = fibonacci.get("short_retracement", "?")
@@ -382,20 +448,27 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
                 lines.append(f"  피보나치  : ✅ 주요레벨 근접 {retr}%")
             else:
                 retr = fibonacci.get("short_retracement")
-                lines.append(f"  피보나치  : — 주요레벨 외부{f'  (현재 {retr}% 반등)' if retr else ''}")
+                lines.append(
+                    f"  피보나치  : — 주요레벨 외부"
+                    + (f"  (현재 {retr}% 반등)" if retr else "")
+                )
 
         lines.append("")
 
-    # ── 시장 심리 ──────────────────────────────────────────────
+    # ── 시장 심리 ─────────────────────────────────────────────
     lines.append("💡 <b>시장 심리</b>")
 
     fr_pct  = funding.get("rate_pct", 0.0) or 0.0
     fr_bias = funding.get("bias", "neutral")
-    fr_icon = ("🟢" if ((direction=="long"  and fr_bias=="long_favorable") or
-                        (direction=="short" and fr_bias=="short_favorable"))
-               else ("🔴" if fr_bias != "neutral" else "⚪"))
-    lines.append(f"  펀딩비   : {fr_icon} {fr_pct:+.4f}%  [{fr_bias}]"
-                 if funding.get("available") else "  펀딩비   : ⚪ N/A")
+    fr_icon = (
+        "🟢" if ((direction=="long"  and fr_bias=="long_favorable") or
+                 (direction=="short" and fr_bias=="short_favorable"))
+        else ("🔴" if fr_bias != "neutral" else "⚪")
+    )
+    lines.append(
+        f"  펀딩비   : {fr_icon} {fr_pct:+.4f}%  [{fr_bias}]"
+        if funding.get("available") else "  펀딩비   : ⚪ N/A"
+    )
 
     mf_detail = next((d for d in micro_details if d[0] == "MarkFunding"), None)
     if mf_detail and mf_detail[1] != 0:
@@ -405,25 +478,39 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
 
     if ls.get("available"):
         ls_bias_v = ls.get("bias", "neutral")
-        ls_icon   = ("🟢" if ((direction=="long"  and ls_bias_v in ("long_favorable","long_extreme")) or
-                              (direction=="short" and ls_bias_v in ("short_favorable","short_extreme")))
-                     else ("🔴" if ls_bias_v != "neutral" else "⚪"))
-        lines.append(f"  롱숏비율 : {ls_icon} 롱{ls.get('long_pct',0.5)*100:.1f}% / 숏{ls.get('short_pct',0.5)*100:.1f}%  [{ls_bias_v}]")
+        ls_icon   = (
+            "🟢" if ((direction=="long"  and ls_bias_v in ("long_favorable","long_extreme")) or
+                     (direction=="short" and ls_bias_v in ("short_favorable","short_extreme")))
+            else ("🔴" if ls_bias_v != "neutral" else "⚪")
+        )
+        lines.append(
+            f"  롱숏비율 : {ls_icon} "
+            f"롱{ls.get('long_pct',0.5)*100:.1f}% / "
+            f"숏{ls.get('short_pct',0.5)*100:.1f}%  [{ls_bias_v}]"
+        )
 
         ls_div = next((d for d in micro_details if d[0] == "LSDivergence"), None)
         if ls_div and ls_div[1] != 0:
             ls_icon2 = "🔴" if ls_div[1] < 0 else "🟢"
             ls_short = ls_div[2].replace("⚠️","").replace("✅","").strip()[:50]
-            lines.append(f"  └ 고래포지션: {ls_icon2} {ls_short}  <i>({ls_div[1]:+d}pt)</i>")
+            lines.append(
+                f"  └ 고래포지션: {ls_icon2} {ls_short}  <i>({ls_div[1]:+d}pt)</i>"
+            )
     else:
         lines.append("  롱숏비율 : ⚪ N/A")
 
     if taker.get("available"):
         tk_bias = taker.get("bias", "neutral")
-        tk_icon = ("🟢" if ((direction=="long"  and tk_bias=="buy_dominant") or
-                            (direction=="short" and tk_bias=="sell_dominant"))
-                   else ("🔴" if tk_bias != "neutral" else "⚪"))
-        lines.append(f"  Taker    : {tk_icon} 매수{taker.get('buy_ratio',0.5)*100:.1f}% / 매도{taker.get('sell_ratio',0.5)*100:.1f}%  [{tk_bias}]")
+        tk_icon = (
+            "🟢" if ((direction=="long"  and tk_bias=="buy_dominant") or
+                     (direction=="short" and tk_bias=="sell_dominant"))
+            else ("🔴" if tk_bias != "neutral" else "⚪")
+        )
+        lines.append(
+            f"  Taker    : {tk_icon} "
+            f"매수{taker.get('buy_ratio',0.5)*100:.1f}% / "
+            f"매도{taker.get('sell_ratio',0.5)*100:.1f}%  [{tk_bias}]"
+        )
     else:
         lines.append("  Taker    : ⚪ N/A")
 
@@ -434,16 +521,25 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         fav_dir      = liq.get("favorable_direction")
         lw = liq.get("long_liq_proxy",  0)
         sw = liq.get("short_liq_proxy", 0)
-        liq_cascade  = next((d for d in micro_details if d[0] == "LiqCascade"), None)
+        liq_cascade = next((d for d in micro_details if d[0] == "LiqCascade"), None)
         if liq_cascade and liq_cascade[1] < 0:
-            lines.append(f"  청산감지  : ⚠️ {display_hint}  <i>(API패널티 {liq_cascade[1]:+d}pt와 상충 — API 우선)</i>")
+            lines.append(
+                f"  청산감지  : ⚠️ {display_hint}  "
+                f"<i>(API패널티 {liq_cascade[1]:+d}pt와 상충 — API 우선)</i>"
+            )
         elif fav_dir == direction:
-            lines.append(f"  청산감지  : {liq_icon} {display_hint}  (롱:{lw:.2f} / 숏:{sw:.2f})")
+            lines.append(
+                f"  청산감지  : {liq_icon} {display_hint}  "
+                f"(롱:{lw:.2f} / 숏:{sw:.2f})"
+            )
         else:
-            lines.append(f"  청산감지  : ⚠️ {display_hint}  ← 진입 방향 역방향 주의  (롱:{lw:.2f} / 숏:{sw:.2f})")
+            lines.append(
+                f"  청산감지  : ⚠️ {display_hint}  "
+                f"← 진입 방향 역방향 주의  (롱:{lw:.2f} / 숏:{sw:.2f})"
+            )
     lines.append("")
 
-    # ── 지표별 점수 ────────────────────────────────────────────
+    # ── 지표별 점수 ───────────────────────────────────────────
     lines.append("📉 <b>지표별 점수</b>")
     regime_name    = regime_info.get("regime", "UNKNOWN")
     actual_weights = config.REGIME_SCORE_WEIGHTS.get(regime_name, config.SCORE_WEIGHTS)
@@ -461,38 +557,56 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         contrib = s * weight
         lines.append(f"  {label_map.get(key, key)}: {_bar(s, 8)}  <i>({contrib:.1f}pt)</i>")
 
-    ema_m_d  = side_result.get("ema_multiplier",  1.0)
-    adx_m_d  = side_result.get("adx_multiplier",  1.0)
-    gate_p   = gate.get("funding_penalty",         1.0)
+    # 패널티 표시 [v3.3: adx_multiplier 제거, bos_conflict_penalty 추가]
+    ema_m_d  = side_result.get("ema_multiplier", 1.0)
+    gate_p   = gate.get("funding_penalty",       1.0)
     rsi_1h_v = rsi.get("value_1h") or 0
     rsi_4h_v = rsi.get("value_4h") or 0
 
-    if ema_m_d         < 1.0: lines.append(f"  EMA역방향 배율    : ×{ema_m_d:.2f}")
-    if adx_m_d         < 1.0: lines.append(f"  ADX횡보 배율      : ×{adx_m_d:.2f}")
-    if gate_p          < 1.0: lines.append(f"  복합 페널티        : ×{gate_p:.2f}")
-    if mtf_penalty     < 1.0: lines.append(f"  ⚠️ MTF RSI 과열 패널티  : ×{mtf_penalty:.2f}  (1h:{rsi_1h_v:.0f} 4h:{rsi_4h_v:.0f})")
-    if exhaustion_mult < 1.0: lines.append(f"  ⚠️ EXPLOSIVE 소진 패널티 : ×{exhaustion_mult:.2f}  (1h RSI:{rsi_1h_v:.0f})")
-    if candle_momentum_m < 1.0: lines.append(f"  ⚠️ 캔들 모멘텀 역방향    : ×{candle_momentum_m:.2f}")
-    if choch_penalty   < 1.0: lines.append(f"  ⚠️ CHoCH 역방향 패널티   : ×{choch_penalty:.2f}  (추세 전환 경고 중)")
+    if ema_m_d            < 1.0: lines.append(f"  EMA역방향 배율           : ×{ema_m_d:.2f}")
+    # adx_multiplier 항목 제거됨 (v3.3) — scoring_system에서 항상 1.0 반환
+    if gate_p             < 1.0: lines.append(f"  복합 페널티              : ×{gate_p:.2f}")
+    if mtf_penalty        < 1.0: lines.append(
+        f"  ⚠️ MTF RSI 과열 패널티  : ×{mtf_penalty:.2f}  (1h:{rsi_1h_v:.0f} 4h:{rsi_4h_v:.0f})"
+    )
+    if exhaustion_mult    < 1.0: lines.append(
+        f"  ⚠️ EXPLOSIVE 소진 패널티: ×{exhaustion_mult:.2f}  (1h RSI:{rsi_1h_v:.0f})"
+    )
+    if candle_momentum_m  < 1.0: lines.append(
+        f"  ⚠️ 캔들 모멘텀 역방향   : ×{candle_momentum_m:.2f}"
+    )
+    if choch_penalty      < 1.0: lines.append(
+        f"  ⚠️ CHoCH 역방향 패널티  : ×{choch_penalty:.2f}  (추세 전환 경고 중)"
+    )
+    # [v3.3] BOS 역방향 패널티 표시 추가
+    if bos_conflict_penalty < 1.0: lines.append(
+        f"  ⚠️ BOS 역방향 패널티    : ×{bos_conflict_penalty:.2f}  "
+        f"({'하락' if direction=='long' else '상승'} BOS 확증 중 역추세 진입)"
+    )
     if micro_total != 0:
         cap_sfx = f" (raw:{micro_raw:+d}pt → cap)" if micro_raw != micro_total else ""
         lines.append(f"  🔬 마이크로구조 합계     : {micro_total:+d}pt{cap_sfx}")
     lines.append("")
 
-    # ── 판단 근거 ──────────────────────────────────────────────
+    # ── 판단 근거 ─────────────────────────────────────────────
     lines.append("🤖 <b>판단 근거</b>")
     reasons = []
 
     if micro_critical:
         for _, p, r in micro_critical[:2]:
-            r_clean = r.replace("⚠️","").replace("[Liq]","").replace("[OI]","").replace("[BB]","").replace("[OB]","").replace("[MF]","").replace("[LS]","").replace("[OBI]","").replace("[CM]","").strip()
+            r_clean = (r.replace("⚠️","").replace("[Liq]","").replace("[OI]","")
+                        .replace("[OB]","").replace("[MF]","").replace("[LS]","")
+                        .replace("[OBI]","").replace("[CM]","").strip())
             reasons.append(f"⚠️ {r_clean[:55]}")
 
     pb_any = rsi.get("pullback_long" if direction=="long" else "pullback_short", False)
     if pb_any:
         grade    = "강" if pb_strong else ("약" if pb_weak else "미세")
         rsi_1h_s = f"{rsi_1h:.1f}" if rsi_1h else "-"
-        reasons.append(f"★ 눌림목({grade}) {'롱' if direction=='long' else '숏'} — 1h RSI({rsi_1h_s})+15m({rsi_val:.0f})")
+        reasons.append(
+            f"★ 눌림목({grade}) {'롱' if direction=='long' else '숏'} "
+            f"— 1h RSI({rsi_1h_s})+15m({rsi_val:.0f})"
+        )
 
     if direction=="long"  and rsi.get("hidden_bull_div"):
         reasons.append("★ 히든 강세 다이버전스 — 가격 Higher Low + RSI Lower Low → 추세 지속")
@@ -511,10 +625,16 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     elif direction=="short" and fibonacci.get("in_golden_pocket_short"):
         reasons.append(f"피보 황금포켓 {fibonacci.get('short_retracement','?')}% — 가장 강력한 재진입 구간")
 
+    # BOS 이유 표시 (방향 일치 시)
     if direction=="long"  and bos_choch.get("bos_bullish"):
         reasons.append("BOS 상승 확증 — 스윙고점 돌파로 상승 구조 지속")
     elif direction=="short" and bos_choch.get("bos_bearish"):
         reasons.append("BOS 하락 확증 — 스윙저점 이탈로 하락 구조 지속")
+    # BOS 방향 충돌 시 (역추세)
+    elif direction=="long"  and bos_choch.get("bos_bearish"):
+        reasons.append(f"⚠️ 하락 BOS 중 역추세 롱 — BOS 패널티 ×{bos_conflict_penalty:.2f}")
+    elif direction=="short" and bos_choch.get("bos_bullish"):
+        reasons.append(f"⚠️ 상승 BOS 중 역추세 숏 — BOS 패널티 ×{bos_conflict_penalty:.2f}")
 
     taker_bias = taker.get("bias", "neutral")
     vol_strong = analysis.get("volume", {}).get("strong", False)
@@ -531,26 +651,33 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
 
     if direction=="long"  and st=="oversold":    reasons.append("RSI 과매도 — 반등 구간")
     elif direction=="short" and st=="overbought": reasons.append("RSI 과매수 — 하락 구간")
-    if direction=="long"  and bb_state_n in ("lower_breakout","near_lower"): reasons.append("볼린저 하단 — 반등 타이밍")
-    if direction=="short" and bb_state_n in ("upper_breakout","near_upper"): reasons.append("볼린저 상단 — 하락 타이밍")
-    if bb.get("squeeze"): reasons.append("볼린저 스퀴즈 — 큰 움직임 임박")
+    if direction=="long"  and bb_state_n in ("lower_breakout","near_lower"):
+        reasons.append("볼린저 하단 — 반등 타이밍")
+    if direction=="short" and bb_state_n in ("upper_breakout","near_upper"):
+        reasons.append("볼린저 상단 — 하락 타이밍")
+    if bb.get("squeeze"):
+        reasons.append("볼린저 스퀴즈 — 큰 움직임 임박")
     if same_count >= 2 and not pb_any:
         reasons.append(f"EMA {same_count}/3TF {'상승' if direction=='long' else '하락'} 일치")
-    if taker.get("available") and taker.get("strength") == "strong" and not any("Taker" in r for r in reasons):
+    if (taker.get("available") and taker.get("strength") == "strong"
+            and not any("Taker" in r for r in reasons)):
         t_icon = "강한 매수체결" if taker_bias=="buy_dominant" else "강한 매도체결"
-        reasons.append(f"Taker {t_icon} ({taker.get('buy_ratio' if direction=='long' else 'sell_ratio',0)*100:.0f}%)")
+        reasons.append(
+            f"Taker {t_icon} "
+            f"({taker.get('buy_ratio' if direction=='long' else 'sell_ratio',0)*100:.0f}%)"
+        )
 
-    # 마이크로구조 보너스 이유 추가
     if micro_bonus:
         for name, p, r in micro_bonus[:1]:
-            r_clean = r.replace("✅","").replace("[OI]","").replace("[Liq]","").replace("[OBI]","").replace("[CM]","").strip()[:50]
+            r_clean = (r.replace("✅","").replace("[OI]","").replace("[Liq]","")
+                        .replace("[OBI]","").replace("[CM]","").strip()[:50])
             reasons.append(f"✅ {r_clean}")
 
     for i, r in enumerate(reasons[:7], 1):
         lines.append(f"  {i}. {r}")
     lines.append("")
 
-    # ── 보너스 ─────────────────────────────────────────────────
+    # ── 보너스 ────────────────────────────────────────────────
     if bonuses:
         applied_bonus = sum(v for _, v in bonuses)
         cap_note = f"  <i>(상한:{bonus_cap}pt 적용)</i>" if bonus_total < applied_bonus else ""
@@ -558,7 +685,8 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         main_b = [(n, v) for n, v in bonuses if v >= 4]
         minor  = sum(v for _, v in bonuses if v < 4)
         parts  = [f"{n}(+{v}pt)" for n, v in main_b]
-        if minor > 0: parts.append(f"기타(+{minor}pt)")
+        if minor > 0:
+            parts.append(f"기타(+{minor}pt)")
         lines.append(f"  {' · '.join(parts)}")
         lines.append("")
 
@@ -596,11 +724,15 @@ def send_heartbeat(symbols: list, scan_count: int, signal_count: int) -> None:
 
 def notify_signal(pipeline_result: dict, analysis: dict) -> bool:
     from scoring_system import record_signal_sent
-    if not pipeline_result.get("should_notify"): return False
+    if not pipeline_result.get("should_notify"):
+        return False
     symbol        = pipeline_result["symbol"]
     direction     = pipeline_result["direction"]
     current_price = analysis.get("current_price") or 0.0
-    logger.info(f"[Notify] {symbol} {direction.upper()} {pipeline_result['score']:.1f}pt — 발송")
+    logger.info(
+        f"[Notify] {symbol} {direction.upper()} "
+        f"{pipeline_result['score']:.1f}pt — 발송"
+    )
     msg    = build_signal_message(pipeline_result, analysis)
     result = send_message(msg)
     if result:
