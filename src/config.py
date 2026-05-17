@@ -1,24 +1,40 @@
 """
-config.py — 전역 설정
+config.py — 전역 설정 (v3.3)
 ────────────────────────────────────────────────────────────────────
-[v3 전면 재조정 — 2026-05]
+[v3.3 개선]
 
-설계 원칙:
-  1. 단순성: 곱셈 패널티를 EMA 배율 하나로 통합 (ADX 멀티플라이어 제거)
-  2. 균형:   RANGING 역방향 배율 완화 (반등 신호 포착 허용)
-  3. 보수성: 보너스 항목 18개로 정리, 최대 캡 36pt (기존 35pt)
-  4. 명확성: 중복/노이즈 보너스 11개 제거
+① SIGNAL_MIN_SCORE 제거
+   기존: regime_threshold(58/60/62/63)와 SIGNAL_MIN_SCORE(63)의 AND 조건
+         → 실질 max(regime,63) = 모든 국면 63pt, 국면별 임계값 무력화
+         → 알림 메시지 "임계:58pt"가 실제 동작과 달라 투명성 훼손
+   수정: SIGNAL_MIN_SCORE 완전 제거, regime_threshold 단독 사용
+   신규 임계값: SQUEEZE 65 / EXPLOSIVE 65 / TRENDING 63 / RANGING 62
+   설계 원칙: 리스크 ∝ 임계값
+     SQUEEZE/EXPLOSIVE → 65pt (페이크아웃/고변동성)
+     TRENDING          → 63pt (구조 확인 수준)
+     RANGING           → 62pt (BOS 패널티가 노이즈 필터링)
 
-[v3.1 가중치 재조정 — OI 제거]
-  - oi_change 완전 제거:
-      /rubik/stat/contracts/open-interest-history 400 오류 지속,
-      항상 neutral(50) 반환으로 신호 가치 없음
-  - 국면별 OI 가중치 재분배:
-      RANGING   (OI 0.05): RSI +0.02, Volume +0.03
-      TRENDING  (OI 0.18): Taker +0.09, LS +0.05, Volume +0.04
-      EXPLOSIVE (OI 0.19): Taker +0.10, LS +0.05, Volume +0.04
-      SQUEEZE   (OI 0.10): BB +0.05, Taker +0.03, Volume +0.02
-      DEFAULT   (OI 0.07): Taker +0.04, Funding +0.02, LS +0.01
+② Volume 가중치 재조정
+   배경: analysis_engine에서 volume 스코어 1.0x=50pt 정규화 후
+         평균 거래량이 ~50pt를 기여 → 기존보다 평균 +3~5pt 상승 예상
+   대응: volume 가중치 하향, 핵심 지표(taker/rsi/bb)에 재분배
+   RANGING:   vol 0.11→0.07  rsi +0.02  bb +0.02
+   TRENDING:  vol 0.14→0.09  taker +0.03  ls +0.02
+   EXPLOSIVE: vol 0.17→0.10  taker +0.05  ls +0.02
+   SQUEEZE:   vol 0.08→0.05  bb +0.02  taker +0.01
+   DEFAULT:   vol 0.05→0.04  taker +0.01
+
+③ 보너스 밸런스
+   FAILED_BREAKOUT: 14→12pt (단독 최고값 해소, PULLBACK_ENTRY와 동일)
+   BOS_CONFIRM:      6→ 8pt (구조 확증 중요도 반영)
+
+④ Gate 단일 패널티 추가 (GATE_PENALTY_SINGLE = 0.92)
+   기존: 펀딩비 AND 롱숏 둘 다 불리 → ×0.80
+   수정: 하나만 불리 → ×0.92(mild)  /  둘 다 불리 → ×0.80(강)
+
+[v3.2] BOS_CONFLICT_PENALTY = 0.82, PRICE_MOVE_RESET_THRESHOLD = -0.025
+[v3.1] OI 완전 제거
+[v3]   ADX 배율 통합, EMA 배율 정비, 보너스 18개 정리
 """
 import os
 
@@ -31,7 +47,7 @@ OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "")
 
-SYMBOLS: list = ["BTC/USDT", "ETH/USDT", "HYPE/USDT", "SOL/USDT", "SUI/USDT"]
+SYMBOLS: list = ["BTC/USDT", "ETH/USDT", "HYPE/USDT", "SOL/USDT", "SUI/USDT", "XRP/USDT"]
 
 TIMEFRAMES    = {"entry": "15m", "mid": "1h", "macro": "4h"}
 CANDLE_LIMITS = {"15m": 100, "1h": 210, "4h": 210}
@@ -54,18 +70,13 @@ ADX_WEAK_TREND  = 25
 ADX_STRONG      = 50
 
 VOLUME_CONFIRM_LOOKBACK   = 20
-VOLUME_SPIKE_MULTIPLIER   = 1.5
-VOLUME_STRONG_MULTIPLIER  = 2.5
+VOLUME_SPIKE_MULTIPLIER   = 1.5   # confirmed 기준 → 점수 70pt+
+VOLUME_STRONG_MULTIPLIER  = 2.5   # strong 기준    → 점수 90pt+
 
 # ══════════════════════════════════════════════════════════════
-# EMA 배율 — 역방향 TF 수에 따른 억제
-# ──────────────────────────────────────────────────────────────
-# v3 변경:
-#   RANGING:  3역방향 0.72 → 0.82  (반등 신호 포착 허용)
-#   TRENDING: 3역방향 0.40 → 0.52  (여전히 패널티, 완화만)
-#   ADX 별도 배율 제거 — EMA 배율이 방향 불확실성을 이미 반영
+# EMA 배율
 # ══════════════════════════════════════════════════════════════
-EMA_MULTIPLIER = {3: 0.52, 2: 0.72, 1: 0.88, 0: 1.00}   # fallback
+EMA_MULTIPLIER = {3: 0.52, 2: 0.72, 1: 0.88, 0: 1.00}
 
 EMA_MULTIPLIER_RANGING   = {3: 0.82, 2: 0.90, 1: 0.96, 0: 1.00}
 EMA_MULTIPLIER_TRENDING  = {3: 0.52, 2: 0.72, 1: 0.88, 0: 1.00}
@@ -93,8 +104,7 @@ LS_LONG_HIGH     = 0.65
 LS_SHORT_EXTREME = 0.62
 LS_SHORT_HIGH    = 0.55
 
-# ❌ OI 제거 — 아래 상수는 더 이상 scoring에서 사용 안 함 (하위 호환용 유지)
-OI_CHANGE_STRONG = 0.05
+OI_CHANGE_STRONG = 0.05  # 하위 호환용
 OI_CHANGE_MILD   = 0.02
 
 TAKER_LOOKBACK    = 100
@@ -110,74 +120,57 @@ REGIME_TREND_ADX     = 25
 REGIME_STRONG_ADX    = 40
 
 # ══════════════════════════════════════════════════════════════
-# 국면별 가중치 — v3.1: oi_change 제거 후 재분배
-# ──────────────────────────────────────────────────────────────
-# 재분배 원칙:
-#   RANGING   → RSI·Volume 강화 (반전 중심, OI 역할 미미했음)
-#   TRENDING  → Taker·LS 강화 (모멘텀 대체, OI가 핵심이었던 국면)
-#   EXPLOSIVE → Taker·LS 강화 (TRENDING과 동일 논리)
-#   SQUEEZE   → BB 강화 (BB가 핵심, OI는 노이즈였음)
-#   DEFAULT   → Taker·Funding·LS 균등 분배
+# 국면별 가중치 — v3.3: volume 가중치 하향 + 핵심 지표 재분배
 # ══════════════════════════════════════════════════════════════
 
-# DEFAULT (UNKNOWN fallback): OI 0.07 제거
-# 원본: rsi:0.25 bb:0.20 fr:0.17 ls:0.13 taker:0.13 oi:0.07 vol:0.05
-# 변경: taker +0.04, funding +0.02, ls +0.01
+# DEFAULT
 SCORE_WEIGHTS = {
     "rsi":              0.25,
     "bollinger":        0.20,
-    "funding_rate":     0.19,  # +0.02
-    "long_short_ratio": 0.14,  # +0.01
-    "taker_volume":     0.17,  # +0.04
-    "volume":           0.05,
+    "funding_rate":     0.19,
+    "long_short_ratio": 0.14,
+    "taker_volume":     0.18,  # +0.01
+    "volume":           0.04,  # -0.01
 }
 
-# RANGING: OI 0.05 제거
-# 원본: rsi:0.28 bb:0.24 fr:0.13 ls:0.12 taker:0.10 oi:0.05 vol:0.08
-# 변경: rsi +0.02, volume +0.03
+# RANGING: 평균 회귀 — RSI/BB 핵심, vol 보조
 SCORE_WEIGHTS_RANGING = {
-    "rsi":              0.30,  # +0.02
-    "bollinger":        0.24,
+    "rsi":              0.32,  # +0.02
+    "bollinger":        0.26,  # +0.02
     "funding_rate":     0.13,
     "long_short_ratio": 0.12,
     "taker_volume":     0.10,
-    "volume":           0.11,  # +0.03
+    "volume":           0.07,  # -0.04
 }
 
-# TRENDING: OI 0.18 제거 (OI 비중이 가장 컸던 국면)
-# 원본: rsi:0.11 bb:0.09 fr:0.15 ls:0.15 taker:0.22 oi:0.18 vol:0.10
-# 변경: taker +0.09, ls +0.05, volume +0.04
+# TRENDING: 추세 추종 — order flow(Taker/LS) 최우선
 SCORE_WEIGHTS_TRENDING = {
     "rsi":              0.11,
     "bollinger":        0.09,
     "funding_rate":     0.15,
-    "long_short_ratio": 0.20,  # +0.05
-    "taker_volume":     0.31,  # +0.09
-    "volume":           0.14,  # +0.04
+    "long_short_ratio": 0.22,  # +0.02
+    "taker_volume":     0.34,  # +0.03
+    "volume":           0.09,  # -0.05
 }
 
-# EXPLOSIVE: OI 0.19 제거
-# 원본: rsi:0.07 bb:0.06 fr:0.15 ls:0.17 taker:0.23 oi:0.19 vol:0.13
-# 변경: taker +0.10, ls +0.05, volume +0.04
+# EXPLOSIVE: 폭발적 움직임 — 실시간 order flow 최우선
 SCORE_WEIGHTS_EXPLOSIVE = {
     "rsi":              0.07,
     "bollinger":        0.06,
     "funding_rate":     0.15,
-    "long_short_ratio": 0.22,  # +0.05
-    "taker_volume":     0.33,  # +0.10
-    "volume":           0.17,  # +0.04
+    "long_short_ratio": 0.24,  # +0.02
+    "taker_volume":     0.38,  # +0.05
+    "volume":           0.10,  # -0.07
 }
 
-# SQUEEZE: OI 0.10 제거
-# 원본: rsi:0.15 bb:0.28 fr:0.13 ls:0.13 taker:0.15 oi:0.10 vol:0.06
-# 변경: bollinger +0.05, taker +0.03, volume +0.02
+# SQUEEZE: 스퀴즈 돌파 — BB 최우선, taker 방향 확인
 SCORE_WEIGHTS_SQUEEZE = {
     "rsi":              0.15,
-    "bollinger":        0.33,  # +0.05
+    "bollinger":        0.35,  # +0.02
     "funding_rate":     0.13,
     "long_short_ratio": 0.13,
-    "taker_volume":     0.18,  # +0.03
-    "volume":           0.08,  # +0.02
+    "taker_volume":     0.19,  # +0.01
+    "volume":           0.05,  # -0.03
 }
 
 REGIME_SCORE_WEIGHTS = {
@@ -189,56 +182,40 @@ REGIME_SCORE_WEIGHTS = {
 }
 
 # ══════════════════════════════════════════════════════════════
-# 보너스 체계 (v3: 18개로 정리, 값 하향 조정)
-# ──────────────────────────────────────────────────────────────
-# 제거됨:
-#   OI_TAKER_CONFIRM, ADX_STRONG, TREND_VOLUME, BAND_WALKING,
-#   LS_DIRECTION_CONFIRM, FUNDING_EXTREME, ATR_MOMENTUM,
-#   CANDLE_CONSECUTIVE, TREND_REVERSAL_WARNING, RSI_DIVERGENCE,
-#   BB_RANGING_REVERSAL (극단과매도 보너스로 통합)
+# 보너스 체계 (v3.3)
 # ══════════════════════════════════════════════════════════════
 
-# 눌림목 (방향 + 타이밍 동시 확인 → 가장 신뢰도 높은 보너스)
-BONUS_PULLBACK_ENTRY       = 12    # 강: 1h RSI>58 + 15m<40
-BONUS_PULLBACK_ENTRY_WEAK  = 8     # 약: 1h RSI>52 + 15m<44
-BONUS_PULLBACK_ENTRY_MICRO = 4     # 미세
+BONUS_PULLBACK_ENTRY       = 12
+BONUS_PULLBACK_ENTRY_WEAK  = 8
+BONUS_PULLBACK_ENTRY_MICRO = 4
 
-# 추세 지속 (EMA+Taker 확인)
-BONUS_TREND_STRONG = 12            # 핵심 추세 추종 보너스
+BONUS_TREND_STRONG = 12
 
-# 반전 신호
-BONUS_BB_RSI_ALIGN         = 8     # BB극단 + RSI다이버전스
-BONUS_LIQUIDATION          = 10    # 대규모 청산 꼬리 (반등/되돌림 기대)
-BONUS_VOL_PRICE_DIV        = 10    # 거래량-가격 다이버전스 (신저가+거래량증가)
-BONUS_FAILED_BREAKOUT      = 14    # 돌파/붕괴 실패 (페이크아웃)
-BONUS_EXTREME_OVERSOLD_MTF = 10    # 전 TF RSI 극단 과매도/과매수 동시
+BONUS_BB_RSI_ALIGN         = 8
+BONUS_LIQUIDATION          = 10
+BONUS_VOL_PRICE_DIV        = 10
+BONUS_FAILED_BREAKOUT      = 12   # [v3.3] 14→12
+BONUS_EXTREME_OVERSOLD_MTF = 10
 
-# SMC 구조
-BONUS_FVG_ENTRY            = 8     # Fair Value Gap 진입
-BONUS_FVG_ENTRY_CONFLICTED = 4     # 양방향 FVG 동시 (모호, 반감)
-BONUS_BOS_CONFIRM          = 6     # BOS 확증
-BONUS_FIB_GOLDEN_POCKET    = 10    # 피보 황금포켓 (61.8~65%)
-BONUS_FIB_KEY_LEVEL        = 5     # 피보 주요 레벨
+BONUS_FVG_ENTRY            = 8
+BONUS_FVG_ENTRY_CONFLICTED = 4
+BONUS_BOS_CONFIRM          = 8    # [v3.3]  6→8
+BONUS_FIB_GOLDEN_POCKET    = 10
+BONUS_FIB_KEY_LEVEL        = 5
 
-# 캔들 패턴
-BONUS_CANDLE_PIN_BAR    = 10       # 핀바
-BONUS_CANDLE_ENGULFING  = 8        # 인걸핑
+BONUS_CANDLE_PIN_BAR    = 10
+BONUS_CANDLE_ENGULFING  = 8
 
-# 기타
-BONUS_HIDDEN_DIVERGENCE = 6        # 히든 다이버전스 (추세 지속)
-BONUS_VOLUME_EXPLOSION  = 7        # 거래량 폭발 + ADX
-BONUS_POST_SQUEEZE      = 10       # Post-Squeeze 모멘텀
-BONUS_MARKET_STRUCT_TREND = 8      # 시장구조 (HigherLow / LowerHigh)
-BONUS_FUNDING_LS_ALIGN  = 6        # 펀딩비 + 롱숏 동일 방향 (약한 확인)
+BONUS_HIDDEN_DIVERGENCE   = 6
+BONUS_VOLUME_EXPLOSION    = 7
+BONUS_POST_SQUEEZE        = 10
+BONUS_MARKET_STRUCT_TREND = 8
+BONUS_FUNDING_LS_ALIGN    = 6
 
-# ── 티어드 보너스 캡 (v3: 완화) ─────────────────────────────
-# base < 36pt: 캡 18pt — 중립 시장, 보너스로 구제 불가
-# 36 ≤ base < 44pt: 캡 26pt — 약한 방향성
-# base ≥ 44pt: 캡 36pt — 명확한 방향성
 BONUS_CAP_TIERS = [(36, 18), (44, 26), (9999, 36)]
 
 # ══════════════════════════════════════════════════════════════
-# 극단 과매도/과매수 역전 신호 파라미터
+# 극단 과매도/과매수
 # ══════════════════════════════════════════════════════════════
 EXTREME_OVERSOLD_15M = 32
 EXTREME_OVERSOLD_1H  = 32
@@ -248,53 +225,42 @@ EXTREME_OVERBOUGHT_15M = 68
 EXTREME_OVERBOUGHT_1H  = 68
 EXTREME_OVERBOUGHT_4H  = 65
 
-# BB streak 억제 면제: RSI < 이 값이면 클라이맥스 셀링 판단 → 억제 해제
 BB_STREAK_SUPPRESS_RSI_EXEMPT = 28
 
 # ══════════════════════════════════════════════════════════════
 # 페널티 파라미터
 # ══════════════════════════════════════════════════════════════
-# MTF RSI 과열 패널티 (soft)
-MTF_RSI_OVERBOUGHT_1H       = 72
-MTF_RSI_OVERBOUGHT_1H_MILD  = 68
-MTF_RSI_OVERBOUGHT_4H       = 65
-MTF_RSI_OVERSOLD_1H         = 28
-MTF_RSI_OVERSOLD_1H_MILD    = 32
-MTF_RSI_OVERSOLD_4H         = 35
-MTF_RSI_PENALTY_STRONG      = 0.85
-MTF_RSI_PENALTY_MILD        = 0.92
+MTF_RSI_OVERBOUGHT_1H        = 72
+MTF_RSI_OVERBOUGHT_1H_MILD   = 68
+MTF_RSI_OVERBOUGHT_4H        = 65
+MTF_RSI_OVERSOLD_1H          = 28
+MTF_RSI_OVERSOLD_1H_MILD     = 32
+MTF_RSI_OVERSOLD_4H          = 35
+MTF_RSI_PENALTY_STRONG       = 0.85
+MTF_RSI_PENALTY_MILD         = 0.92
 MTF_RSI_OVERSOLD_1H_EXTREME  = 24
 MTF_RSI_OVERBOUGHT_1H_EXTREME = 76
 
-# EXPLOSIVE 소진 패널티
 EXPLOSIVE_EXHAUSTION_RSI_LONG  = 70
 EXPLOSIVE_EXHAUSTION_RSI_SHORT = 30
 EXPLOSIVE_EXHAUSTION_PENALTY   = 0.88
 
-# CHoCH 역방향 패널티
-CHOCH_AGAINST_PENALTY = 0.88
+CHOCH_AGAINST_PENALTY = 0.88   # CHoCH: 추세 전환 "경고"
+BOS_CONFLICT_PENALTY  = 0.82   # BOS:   추세 방향 "확증" — CHoCH보다 강함
 
-# 캔들 모멘텀 역방향 패널티
 CANDLE_MOMENTUM_PENALTY_RANGING   = 0.80
 CANDLE_MOMENTUM_PENALTY_EXPLOSIVE  = 0.85
 CANDLE_MOMENTUM_PENALTY_TRENDING   = 0.90
 
-# ❌ OI 스파이크 필터 — oi_change 제거로 미사용 (하위 호환용 유지)
-OI_SPIKE_THRESHOLD    = 0.80
+# Gate 패널티 [v3.3]
+GATE_PENALTY_SINGLE = 0.92   # 펀딩비 OR 롱숏 하나만 불리
+GATE_PENALTY_DUAL   = 0.80   # 둘 다 불리 (기존 유일 패널티)
+
+OI_SPIKE_THRESHOLD     = 0.80  # 하위 호환용
 OI_SPIKE_SCORE_PENALTY = 20
 
 # ══════════════════════════════════════════════════════════════
-# 반전 신호 파라미터 (추세 전환 경고용 — 현재 코드에서 미사용)
-# ══════════════════════════════════════════════════════════════
-REVERSAL_RSI_1H_OB     = 72
-REVERSAL_RSI_1H_OS     = 28
-REVERSAL_TAKER_SELL    = 0.55
-REVERSAL_TAKER_BUY     = 0.55
-REVERSAL_FUNDING_POS   = 0.0005
-REVERSAL_FUNDING_NEG   = -0.0005
-
-# ══════════════════════════════════════════════════════════════
-# SMC / 피보나치 파라미터
+# SMC / 피보나치
 # ══════════════════════════════════════════════════════════════
 FIB_LOOKBACK      = 50
 FIB_TOLERANCE     = 0.015
@@ -307,22 +273,22 @@ VOL_DIV_BEAR_VOLUME_RATIO = 0.67
 MARKET_STRUCT_SWING_THRESHOLD = 0.005
 
 # ══════════════════════════════════════════════════════════════
-# 신호 임계값 (v3: RANGING 완화 60, TRENDING 강화 62)
+# 신호 임계값 (v3.3: SIGNAL_MIN_SCORE 제거, 국면별 단독 운용)
 # ══════════════════════════════════════════════════════════════
 REGIME_THRESHOLDS = {
-    "SQUEEZE":   63,
-    "TRENDING":  62,
-    "RANGING":   60,
-    "EXPLOSIVE": 58,
+    "SQUEEZE":   65,
+    "TRENDING":  63,
+    "RANGING":   62,
+    "EXPLOSIVE": 65,
 }
-SIGNAL_MIN_SCORE = 63
+# SIGNAL_MIN_SCORE 제거됨 (v3.3) — regime_threshold 단독 사용
 
 # ══════════════════════════════════════════════════════════════
 # 동적 쿨다운
 # ══════════════════════════════════════════════════════════════
 PRICE_MOVE_SUPPRESS_STRONG  = 0.05
 PRICE_MOVE_SUPPRESS_MILD    = 0.03
-PRICE_MOVE_RESET_THRESHOLD  = -0.01
+PRICE_MOVE_RESET_THRESHOLD  = -0.025
 COOLDOWN_SUPPRESSED_STRONG  = 120
 COOLDOWN_SUPPRESSED_MILD    = 75
 
