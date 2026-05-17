@@ -6,24 +6,19 @@ scoring_system.py — 점수 산출 (v3.3)
 ① base_score 유령 계산 제거
    기존: base_score에 mtf_penalty, exhaustion_mult를 중간에 곱산 적용했지만
          최종 공식은 base_before_soft를 사용 → 수정된 base_score는 사실상 미사용
-         (로깅에만 사용, 최종 결과에 미영향)
-   수정: base_score 단일 변수로 통합 (base_before_soft 별칭 제거)
-         중간 수정 없이 soft_penalty 체인에서 일괄 적용
-   효과: 변수 흐름 명확, "수정됐지만 무시됨" 코드 패턴 제거
+   수정: base_score 단일 변수로 통합, soft_penalty 체인에서 일괄 적용
 
 ② SIGNAL_MIN_SCORE 제거
    기존: signal = (score >= regime_threshold) AND (score >= SIGNAL_MIN_SCORE=63)
          → 실질 max(regime, 63), 국면별 임계값 무의미
    수정: signal = (score >= regime_threshold) 단독
-         국면별 임계값이 실제로 작동 (SQUEEZE/EXPLOSIVE 65, TRENDING 63, RANGING 62)
 
 ③ 거래량 페널티 추가 (v3.3 patch)
-   배경: volume 가중치 5~9%로 낮아 0pt여도 raw_score 억제 ~2.5~4.5pt에 불과.
-         보너스 하나(+4pt~)로 쉽게 상쇄 → 저거래량(주말 등) 신호 과다 발생.
-   수정: vol score 기준 명시적 덧셈 페널티 추가.
-     score <  5pt (ratio <  10%) → -7pt  (사실상 거래 없음)
-     score < 15pt (ratio <  30%) → -3pt  (평균 30% 미달)
-     score ≥ 15pt                →  0pt  (정상 범위)
+   volume 가중치 5~9%로 낮아 보너스 하나로 상쇄 가능.
+   vol score 기준 명시적 덧셈 페널티:
+     score <  5pt (ratio <  10%) → -7pt
+     score < 15pt (ratio <  30%) → -3pt
+     score ≥ 15pt                →  0pt
    적용 공식:
      final_score = (base + bonus) × soft_penalty + micro_penalty + volume_penalty
 
@@ -129,7 +124,7 @@ def calculate_entry_score(analysis: dict, direction: str,
             f"15m:{rsi_val_15m:.0f} 1h:{rsi_val_1h:.0f} 4h:{rsi_val_4h:.0f} BB:{bb_state_str}"
         )
 
-    # ── base_score (v3.3: 단일 변수, 중간 수정 없음) ──────────────
+    # ── base_score ───────────────────────────────────────────────
     base_score = raw_score * ema_mult * gate_penalty
 
     # ── soft 패널티 계산 ──────────────────────────────────────────
@@ -468,7 +463,7 @@ def calculate_entry_score(analysis: dict, direction: str,
 
     # ── 거래량 페널티 [v3.3 patch] ───────────────────────────────
     # volume 가중치 5~9%로 낮아 0pt여도 raw_score 억제 ~2.5~4.5pt에 불과.
-    # 보너스 하나(+4pt~)로 쉽게 상쇄되어 저거래량(주말 등) 신호 과다 발생.
+    # 보너스 하나(+4pt~)로 쉽게 상쇄 → 저거래량(주말 등) 신호 과다 발생.
     # → vol score 기준 명시적 덧셈 페널티로 추가 억제.
     vol_score = vol.get("score", 50.0)
     if vol_score < config.VOLUME_PENALTY_LOW_THRESHOLD:
@@ -498,7 +493,7 @@ def calculate_entry_score(analysis: dict, direction: str,
         )), 2
     )
 
-    # [v3.3] SIGNAL_MIN_SCORE 제거: regime_threshold 단독 기준
+    # regime_threshold 단독 기준 (SIGNAL_MIN_SCORE 제거)
     regime_threshold = regime.get("threshold", config.REGIME_THRESHOLDS.get("TRENDING", 63))
     signal = (final_score >= regime_threshold)
 
