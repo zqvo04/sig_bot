@@ -7,6 +7,18 @@ analysis_engine.py — 분석 엔진 (v3.3)
     공식: ratio≤0.5: 0~25pt / 0.5~1.0: 25~50pt / 1.0~1.5: 50~70pt
           1.5~2.5: 70~90pt / 2.5+: 90~100pt
     기본 반환값도 50.0pt로 변경 (데이터 없을 때 중립 처리)
+
+- check_volume_confirmation: 기준 캔들 및 lookback 개선 (v3.3 patch)
+    문제 ①: 신호는 항상 새 15분봉 시작 시점 → iloc[-1]은 방금 열린 캔들
+             (거래량 ≈ 0) → ratio가 구조적으로 낮게 산출되는 버그
+    문제 ②: lookback 20개(5시간)는 스파이크 오염 취약
+             + 주말/평일 패턴 차이를 흡수하지 못함
+    수정:
+      cur_vol: iloc[-1] → iloc[-2]  (직전 완성 캔들)
+      avg_vol: iloc[-21:-1] → iloc[-(lb+2):-2]  (완성 캔들 기준 lb개 평균)
+      VOLUME_CONFIRM_LOOKBACK: 20 → 48 (config.py)
+      최소 데이터 요건: lb+3 → lb+2+1 = lb+3 (기존과 동일, 여유 확보)
+
 - evaluate_gates: 단일 불리 패널티 추가 (GATE_PENALTY_SINGLE = 0.92)
     기존: 펀딩비 AND 롱숏 둘 다 불리해야 ×0.80 (거의 발동 안 함)
     수정: 하나만 불리 → ×0.92, 둘 다 불리 → ×0.80
@@ -56,24 +68,39 @@ def get_atr_state(df: pd.DataFrame) -> dict:
 
 def check_volume_confirmation(df: pd.DataFrame) -> dict:
     """
-    [v3.3] Volume 스코어 스케일 정규화
-    기존: 1.0x(평균) = 20pt → 다른 지표(50pt=중립)와 스케일 불일치
-    수정: 1.0x(평균) = 50pt → 가중치가 실질적으로 작동하도록 정규화
+    [v3.3 patch] Volume 기준 캔들 및 lookback 개선
 
-    공식:
-      ratio ≤ 0.5:         0 ~ 25pt  (거래량 매우 낮음)
-      0.5 < ratio ≤ 1.0:  25 ~ 50pt (평균 미달, ratio=1.0 → 50pt)
-      1.0 < ratio ≤ 1.5:  50 ~ 70pt (평균 이상, confirmed 근처)
-      1.5 < ratio ≤ 2.5:  70 ~ 90pt (spike, confirmed)
-      ratio > 2.5:         90 ~100pt (strong spike)
+    변경 전:
+      cur_vol = iloc[-1]          ← 신호 시점 기준 방금 열린 캔들 (거래량 ≈ 0)
+      avg_vol = iloc[-21:-1].mean() ← lookback 20개 (5시간)
+
+    변경 후:
+      cur_vol = iloc[-2]               ← 직전 완성된 15분봉
+      avg_vol = iloc[-(lb+2):-2].mean() ← 그 이전 lb개 완성 캔들 평균 (lb=48, 12시간)
+
+    최소 데이터 요건: lb + 3개 (완성 캔들 lb개 + 비교 기준 1개 + 현재 열린 캔들 1개)
+    CANDLE_LIMITS["15m"]=100 → lb=48 기준 버퍼 50개 확보
+
+    Score 공식 (v3.3 정규화, 변경 없음):
+      ratio ≤ 0.5:         0 ~ 25pt
+      0.5 < ratio ≤ 1.0:  25 ~ 50pt  (ratio=1.0 → 50pt = 중립)
+      1.0 < ratio ≤ 1.5:  50 ~ 70pt
+      1.5 < ratio ≤ 2.5:  70 ~ 90pt
+      ratio > 2.5:         90 ~100pt
     """
-    lb = config.VOLUME_CONFIRM_LOOKBACK
+    lb = config.VOLUME_CONFIRM_LOOKBACK  # 48
     _empty = {"confirmed":False,"strong":False,"ratio":0.0,"score":50.0,
               "current_vol":0.0,"avg_vol":0.0}
-    if df is None or len(df) < lb+1:
+
+    # lb개 평균 + 비교 기준 1개 + 현재 열린 캔들 1개 = lb+2 최소 필요
+    # 여유를 위해 lb+3 체크
+    if df is None or len(df) < lb + 3:
         return _empty
-    cur_vol = float(df["volume"].iloc[-1])
-    avg_vol = float(df["volume"].iloc[-(lb+1):-1].mean())
+
+    # 직전 완성 캔들 vs 그 이전 lb개 완성 캔들 평균
+    cur_vol = float(df["volume"].iloc[-2])
+    avg_vol = float(df["volume"].iloc[-(lb+2):-2].mean())
+
     if avg_vol <= 0:
         return _empty
 
@@ -93,6 +120,11 @@ def check_volume_confirmation(df: pd.DataFrame) -> dict:
         score = 70.0 + ((ratio - 1.5) / 1.0) * 20.0          # 70~90pt
     else:
         score = min(100.0, 90.0 + (ratio - 2.5) * 4.0)       # 90~100pt
+
+    logger.debug(
+        f"[Volume] cur:{cur_vol:.1f} avg:{avg_vol:.1f} "
+        f"ratio:{ratio:.3f}x → score:{score:.1f}pt"
+    )
 
     return {
         "confirmed":   confirmed,
@@ -578,17 +610,10 @@ def classify_market_regime(df_15m: pd.DataFrame, adx: dict, bb: dict) -> dict:
 
 
 # ══════════════════════════════════════════════
-# 11. 게이팅 [v3.3: 단일 불리 패널티 추가]
+# 11. 게이팅
 # ══════════════════════════════════════════════
 
 def evaluate_gates(direction: str, funding: dict, ls_ratio_result: dict) -> dict:
-    """
-    [v3.3] 단일 지표 불리 패널티 추가
-    기존: 펀딩비 AND 롱숏 둘 다 불리해야만 ×0.80 → 발화 희소
-    수정:
-      하나만 불리 → ×0.92 (mild, GATE_PENALTY_SINGLE)
-      둘 다 불리  → ×0.80 (강,  GATE_PENALTY_DUAL)
-    """
     funding_bias = funding.get("bias", "neutral")
     ls_bias      = ls_ratio_result.get("bias", "neutral")
     penalty_factor = 1.0; penalty_reason = None
@@ -874,7 +899,8 @@ def run_full_analysis(symbol: str, collected_data: dict) -> dict:
         f"4h:{rsi.get('value_4h') or '-'} [{rsi['state']}] | "
         f"BB:{bb['state']}(%B={bb['pct_b']:.2f}) | "
         f"ADX:{adx_15m['adx']:.1f}[{adx_15m['strength']}] | "
-        f"국면:{regime_name} | Vol:{vol['ratio']:.2f}x({vol['score']:.0f}pt) | "
+        f"국면:{regime_name} | "
+        f"Vol:{vol['ratio']:.2f}x({vol['score']:.0f}pt) cur:{vol['current_vol']:.1f} avg:{vol['avg_vol']:.1f} | "
         f"Taker:{taker.get('bias','?')} | 청산:{liq.get('signal','none')}"
     )
     if bos_choch.get("bos_bullish") or bos_choch.get("bos_bearish"):
