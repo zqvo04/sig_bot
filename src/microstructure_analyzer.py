@@ -1,43 +1,44 @@
 """
-microstructure_analyzer.py  (v2.4 — 업그레이드)
+microstructure_analyzer.py  (v3.3)
 ──────────────────────────────────────────────────────────────────────────────
-[v2.3 → v2.4 변경]
+[v3.3 변경]
 
-★ Fix 1: 방안 6 펀딩비 임계값 수정 (0.030→0.003, 0.015→0.001)
-  OKX 실제 펀딩비 스케일 = 소수점 (0.000038 = 0.0038%)
-  기존 0.030 임계값은 3%로 사실상 절대 발동 불가였음
-  → MarkFunding 신호가 처음으로 실제 작동함
+★ OI Velocity 완전 제거 (방안 3)
+  - fetch_oi_history(), _fetch_oi_history_fallback(), analyze_oi_velocity() 삭제
+  - 제거 근거:
+    1. OKX fetch_open_interest_history → 빈번한 API 오류(400)
+    2. 폴백 시 단일 OI값 사용 → oi_d≈0 → 항상 중립 반환 → 실효성 없음
+    3. 유지 비용 대비 신호 기여도 없음
 
-★ Fix 2: 방안 1 Liquidation 임계값 완화
-  기존: lr > 0.70 AND count >= 5  → 거의 발동 없음
-  수정: lr > 0.55 AND count >= 2  → 실질 신호 생성
+★ fetch_ohlcv_micro() 신설
+  - 5분봉 OHLCV만 수집 (OI 없음)
+  - 방안 5(Candle Momentum) 단독 데이터 소스
 
-★ Replace: 방안 4 BB Direction Compat → OB Volume Imbalance
-  BB 정보는 analysis_engine이 이미 완전히 처리함 (이중 반영)
-  → 주문장 전체 bid/ask 잔량 비율로 교체 (순수 마이크로구조 신호)
-  → 기존 orderbook 데이터 재사용, 추가 API 없음
+★ "oi_history" → "ohlcv_micro" 키 리네임
+  - fetch_all_microstructure() 반환 dict 키 변경
+  - compute_microstructure_penalties() 참조 키 변경
 
-★ New: 방안 5 Candle Momentum (CVD Proxy)
-  OI 히스토리 fetch 시 같이 가져오는 OHLCV 재활용
-  캔들 방향(close-open 부호) × 상대 body 크기 × 거래량 가중
-  → 최근 5캔들 가중평균 → 단기 매수/매도 압력 정량화
-  → 추가 API 호출 없음
-
-방안 구조:
+★ 방안 번호 재정리 (7개 → 6개)
   방안 1: Liquidation Cascade Discriminator
-  방안 2: Order Book Wall Detection        (기존)
-  방안 3: OI Velocity Matrix               (기존)
-  방안 4: OB Volume Imbalance              (신규 교체)
-  방안 5: Candle Momentum / CVD Proxy     (신규)
-  방안 6: Mark Price + Next Funding Rate  (임계값 수정)
-  방안 7: Account vs Position LS Divergence (기존)
-  → 7개 분석 함수 / 6개 데이터 수집 포인트
+  방안 2: Order Book Wall Detection
+  방안 3: OB Volume Imbalance          (기존 방안 4)
+  방안 4: Candle Momentum / CVD Proxy  (기존 방안 5)
+  방안 5: Mark Price + Funding Rate    (기존 방안 6, v2.4 임계값 수정 유지)
+  방안 6: Account vs Position LS Divergence (기존 방안 7)
+  → 6개 분석 / 5개 데이터 수집 포인트
+
+★ fetch_all_microstructure() status 5개로 업데이트
+  기존: Liq/OB/OI/CM/MF/LS (6개)
+  수정: Liq/OB/CM/MF/LS    (5개, OI 제거)
+
+[v2.4] 펀딩비 임계값 수정(0.030→0.003), Liquidation 임계값 완화, OBImbalance 추가, CandleMom 추가
+[v2.3] 시스템 초기 구축
 ──────────────────────────────────────────────────────────────────────────────
 """
 
 import logging
 import time
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 
 import requests
 
@@ -52,7 +53,8 @@ OKX_BASE = "https://www.okx.com/api/v5"
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _to_ccxt_swap(symbol: str) -> str:
-    if ":" in symbol: return symbol
+    if ":" in symbol:
+        return symbol
     p = symbol.split("/")
     return f"{p[0]}/{p[1]}:{p[1]}" if len(p) == 2 else symbol
 
@@ -66,11 +68,9 @@ def _to_uly(symbol: str) -> str:
     return _to_base_id(symbol)
 
 def _to_ccy(symbol: str) -> str:
-    """BTC/USDT → BTC"""
     return symbol.split("/")[0]
 
 def _okx_get(path: str, params: dict = None) -> dict:
-    """OKX 공개 API 직접 호출"""
     try:
         r = requests.get(
             f"{OKX_BASE}{path}",
@@ -95,9 +95,11 @@ def fetch_liquidation_data(exchange, symbol: str, lookback_minutes: int = 30) ->
       'buy'  = 숏 포지션 강제청산 (시장 매수압력)
       'sell' = 롱 포지션 강제청산 (시장 매도압력)
     """
-    empty = {"long_liq_vol": 0.0, "short_liq_vol": 0.0,
-             "long_liq_count": 0, "short_liq_count": 0,
-             "total_vol": 0.0, "available": False}
+    empty = {
+        "long_liq_vol": 0.0, "short_liq_vol": 0.0,
+        "long_liq_count": 0, "short_liq_count": 0,
+        "total_vol": 0.0, "available": False,
+    }
     try:
         resp = _okx_get("/public/liquidation-orders", {
             "instType": "SWAP",
@@ -115,11 +117,12 @@ def fetch_liquidation_data(exchange, symbol: str, lookback_minutes: int = 30) ->
             for d in item.get("details", []):
                 try:
                     ts   = float(d.get("ts", 0))
-                    if ts < cutoff_ms: continue
+                    if ts < cutoff_ms:
+                        continue
                     sz   = float(d.get("sz", 0))
                     side = d.get("side", "")
-                    if side == "buy":    sv += sz; sc += 1   # 숏 포지션 청산
-                    elif side == "sell": lv += sz; lc += 1   # 롱 포지션 청산
+                    if side == "buy":      sv += sz; sc += 1
+                    elif side == "sell":   lv += sz; lc += 1
                 except Exception:
                     continue
 
@@ -136,11 +139,8 @@ def fetch_liquidation_data(exchange, symbol: str, lookback_minutes: int = 30) ->
         return empty
 
 
-def analyze_liquidation_cascade(liq: dict, taker_buy_pct: float, direction: str) -> Tuple[int, str]:
-    """
-    ★ v2.4: 임계값 완화 (lr>0.70,count>=5 → lr>0.55,count>=2)
-    너무 엄격한 조건으로 실질 신호 없던 문제 수정
-    """
+def analyze_liquidation_cascade(liq: dict, taker_buy_pct: float,
+                                 direction: str) -> Tuple[int, str]:
     direction = direction.upper()
     if not liq.get("available") or liq["total_vol"] == 0:
         return 0, ""
@@ -148,36 +148,39 @@ def analyze_liquidation_cascade(liq: dict, taker_buy_pct: float, direction: str)
     t  = liq["total_vol"]
     sr = liq["short_liq_vol"] / t
     lr = liq["long_liq_vol"]  / t
-    tk = taker_buy_pct / 100.0   # buy_pct(0~100) → 0~1
+    tk = taker_buy_pct / 100.0
 
     p, r = 0, ""
 
     if direction == "LONG":
         if tk > 0.72 and sr > 0.60:
-            # 숏 청산 주도 + taker 매수 과열 → 스퀴즈 말미 위험
-            p = -12; r = f"⚠️[Liq] 숏청산 주도+taker과열(스퀴즈말미) short:{sr:.0%} taker:{tk:.0%}"
+            p = -12
+            r = f"⚠️[Liq] 숏청산+taker과열(스퀴즈말미) short:{sr:.0%} taker:{tk:.0%}"
         elif lr > 0.55 and liq["long_liq_count"] >= 2:
             if liq["long_liq_count"] >= 5:
-                # 대형 롱 캐스케이드
-                p = -15; r = f"⚠️[Liq] 롱청산 캐스케이드 롱:{lr:.0%} ×{liq['long_liq_count']}건"
+                p = -15
+                r = f"⚠️[Liq] 롱청산 캐스케이드 롱:{lr:.0%} ×{liq['long_liq_count']}건"
             else:
-                # 중간 규모 롱 청산
-                p = -8;  r = f"⚠️[Liq] 롱청산 압력 롱:{lr:.0%} ×{liq['long_liq_count']}건"
+                p = -8
+                r = f"⚠️[Liq] 롱청산 압력 롱:{lr:.0%} ×{liq['long_liq_count']}건"
         elif lr > 0.60 and tk > 0.60 and liq["long_liq_count"] < 3:
-            # 소규모 롱 청산 후 실매수 → 반등 기대
-            p = +8; r = "✅[Liq] 롱청산 완료 후 실매수 반전"
+            p = +8
+            r = "✅[Liq] 롱청산 완료 후 실매수 반전"
 
     elif direction == "SHORT":
         if tk < 0.32 and lr > 0.60:
-            # 롱 청산 주도 + taker 매도 과열 → 바닥 부근 숏 위험
-            p = -10; r = f"⚠️[Liq] 롱청산 말미 숏역방향 위험 long:{lr:.0%} taker:{tk:.0%}"
+            p = -10
+            r = f"⚠️[Liq] 롱청산 말미 숏역방향 위험 long:{lr:.0%} taker:{tk:.0%}"
         elif sr > 0.55 and liq["short_liq_count"] >= 2:
             if liq["short_liq_count"] >= 5:
-                p = -15; r = f"⚠️[Liq] 숏청산 캐스케이드 숏:{sr:.0%} ×{liq['short_liq_count']}건"
+                p = -15
+                r = f"⚠️[Liq] 숏청산 캐스케이드 숏:{sr:.0%} ×{liq['short_liq_count']}건"
             else:
-                p = -8;  r = f"⚠️[Liq] 숏청산 압력 숏:{sr:.0%} ×{liq['short_liq_count']}건"
+                p = -8
+                r = f"⚠️[Liq] 숏청산 압력 숏:{sr:.0%} ×{liq['short_liq_count']}건"
         elif sr > 0.60 and tk < 0.38 and liq["short_liq_count"] < 3:
-            p = +8; r = "✅[Liq] 숏청산 완료 후 실매도 반전"
+            p = +8
+            r = "✅[Liq] 숏청산 완료 후 실매도 반전"
 
     return p, r
 
@@ -195,10 +198,8 @@ def fetch_orderbook_data(exchange, symbol: str, depth: int = 20) -> dict:
         return {"bids": [], "asks": [], "available": False}
 
 
-def analyze_orderbook_pressure(
-    books: dict, current_price: float, direction: str, depth: int = 20
-) -> Tuple[int, str, Optional[float]]:
-    """가격 근처 대형 주문벽(wall) 탐지"""
+def analyze_orderbook_pressure(books: dict, current_price: float,
+                                direction: str, depth: int = 20) -> Tuple[int, str, Optional[float]]:
     direction = direction.upper()
     if not books.get("available") or not books["bids"] or not books["asks"]:
         return 0, "", None
@@ -243,154 +244,17 @@ def analyze_orderbook_pressure(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 방안 3: OI Velocity Matrix
+# 방안 3: OB Volume Imbalance  (기존 방안 4)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _fetch_oi_history_fallback(exchange, symbol: str, periods: int) -> list:
+def analyze_orderbook_imbalance(books: dict, direction: str,
+                                 depth: int = 10) -> Tuple[int, str]:
     """
-    fetch_open_interest_history 실패 시 폴백.
-    현재 OI(단일값) + OHLCV 조합.
-    OI가 일정 → oi_d≈0 → velocity 분석 neutral (안전)
-    """
-    try:
-        swap = _to_ccxt_swap(symbol)
-        resp = _okx_get("/public/open-interest", {"instId": _to_swap_id(symbol)})
-        if not resp.get("data"):
-            return []
-        current_oi = float(resp["data"][0].get("oi", 0))
-        if current_oi <= 0:
-            return []
-        ohlcv = exchange.fetch_ohlcv(swap, "5m", limit=periods)
-        if not ohlcv:
-            return []
-        result = [
-            {"oi": current_oi, "close": float(c[4]), "ts": c[0],
-             "open": float(c[1]), "high": float(c[2]), "low": float(c[3]),
-             "volume": float(c[5])}
-            for c in ohlcv
-        ]
-        logger.debug(f"[Micro/OI] 폴백: OI={current_oi:.0f}, {len(result)}캔들")
-        return result
-    except Exception as e:
-        logger.warning(f"[Micro/OI] 폴백 실패 ({symbol}): {e}")
-        return []
+    전체 bid/ask 잔량 비율로 단기 방향 압력 측정.
 
-
-def fetch_oi_history(exchange, symbol: str, periods: int = 12) -> list:
-    """
-    OHLCV 포함 확장 레코드 반환.
-    CCXT 성공 시: {oi, close, ts}
-    폴백 시:      {oi, close, ts, open, high, low, volume}
-    """
-    try:
-        swap    = _to_ccxt_swap(symbol)
-        oi_list = exchange.fetch_open_interest_history(swap, "5m", limit=periods)
-        ohlcv   = exchange.fetch_ohlcv(swap, "5m", limit=periods)
-        pm      = {c[0]: c for c in ohlcv}   # ts → candle 매핑
-        result  = []
-        for x in oi_list:
-            ts  = x.get("timestamp", 0)
-            oi  = float(x.get("openInterestAmount") or x.get("openInterest") or 0)
-            c   = pm.get(ts)
-            result.append({
-                "oi":     oi,
-                "close":  float(c[4]) if c else 0.0,
-                "ts":     ts,
-                "open":   float(c[1]) if c else 0.0,
-                "high":   float(c[2]) if c else 0.0,
-                "low":    float(c[3]) if c else 0.0,
-                "volume": float(c[5]) if c else 0.0,
-            })
-        return result
-    except (TypeError, AttributeError):
-        logger.debug(f"[Micro/OI] fetch_open_interest_history 미지원 → 폴백 ({symbol})")
-        return _fetch_oi_history_fallback(exchange, symbol, periods)
-    except Exception as e:
-        logger.warning(f"[Micro/OI] 수집 실패 ({symbol}): {e}")
-        return _fetch_oi_history_fallback(exchange, symbol, periods)
-
-
-def analyze_oi_velocity(oi_history: list, direction: str, regime: str = "") -> Tuple[int, str]:
-    """OI 변화 방향 × 가격 방향 4분면 분류"""
-    direction = direction.upper()
-    if len(oi_history) < 6:
-        return 0, ""
-    try:
-        e3 = oi_history[:3]    # 오래된 3개
-        r3 = oi_history[-3:]   # 최근 3개
-        avg_oi_e = sum(x["oi"]    for x in e3) / 3
-        avg_oi_r = sum(x["oi"]    for x in r3) / 3
-        avg_px_e = sum(x["close"] for x in e3) / 3
-        avg_px_r = sum(x["close"] for x in r3) / 3
-        if avg_oi_e == 0 or avg_px_e == 0:
-            return 0, ""
-
-        oi_d = (avg_oi_r - avg_oi_e) / avg_oi_e
-        px_d = (avg_px_r - avg_px_e) / avg_px_e
-        TH   = 0.008
-
-        oi_up = oi_d > TH; oi_dn = oi_d < -TH
-        px_up = px_d > TH; px_dn = px_d < -TH
-
-        # OI 폴백(단일값)이면 oi_up/oi_dn 모두 False → neutral 반환
-        if not (oi_up or oi_dn) and not (px_up or px_dn):
-            return 0, ""
-
-        mult = 0.6 if regime == "EXPLOSIVE" else 1.0
-        p, name, r = 0, "NEUTRAL", ""
-
-        if oi_up and px_up:
-            name = "ACCUMULATION"
-            if direction == "SHORT":
-                p = int(-10 * mult)
-                r = f"⚠️[OI] ACCUMULATION 숏역행 (oi:{oi_d:+.1%} px:{px_d:+.1%})"
-            else:
-                p = +5; r = "✅[OI] ACCUMULATION 신규롱 축적"
-        elif oi_up and px_dn:
-            name = "SHORT_BUILDUP"
-            if direction == "LONG":
-                p = int(-10 * mult)
-                r = f"⚠️[OI] SHORT_BUILDUP 롱역행 (oi:{oi_d:+.1%} px:{px_d:+.1%})"
-            else:
-                p = +5; r = "✅[OI] SHORT_BUILDUP 신규숏 진입"
-        elif oi_dn and px_up:
-            name = "SHORT_SQUEEZE"
-            if direction == "LONG":
-                p = int(-12 * mult)
-                r = f"⚠️[OI] SHORT_SQUEEZE 말미 롱위험 (oi:{oi_d:+.1%} px:{px_d:+.1%})"
-        elif oi_dn and px_dn:
-            name = "LONG_LIQUIDATION"
-            if direction == "LONG":
-                p = int(-15 * mult)
-                r = f"⚠️[OI] LONG_LIQUIDATION 롱금지 (oi:{oi_d:+.1%} px:{px_d:+.1%})"
-            elif direction == "SHORT" and oi_d < -0.03:
-                p = int(-6 * mult)
-                r = "⚠️[OI] LONG_LIQUIDATION 과매도 숏주의"
-
-        logger.debug(f"[OI/{regime}] {name} oi_δ:{oi_d:.2%} px_δ:{px_d:.2%} → {p:+d}pt")
-        return p, r
-    except Exception as e:
-        logger.warning(f"[Micro/OI] 분석 실패: {e}")
-        return 0, ""
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 방안 4: OB Volume Imbalance  [★ v2.4 신규 — BB Compat 교체]
-# ══════════════════════════════════════════════════════════════════════════════
-
-def analyze_orderbook_imbalance(books: dict, direction: str, depth: int = 10) -> Tuple[int, str]:
-    """
-    ★ v2.4 신규: 전체 bid/ask 잔량 비율로 단기 방향 압력 측정
-    BB Direction Compat 교체 (BB는 analysis_engine이 이미 처리)
-
-    bid_ratio = total_bid_vol / (total_bid_vol + total_ask_vol)
-      > 0.62: 매수 압력 우세 → 롱 유리
-      < 0.38: 매도 압력 우세 → 숏 유리
-      사이: 중립
-
-    Wall Detection(방안 2)과 상호보완:
+    방안 2(Wall Detection)와 상호보완:
       방안 2: 가격 근처 단일 대형 주문 탐지 (즉각 저항/지지)
-      방안 4: 전체 호가창 균형 측정 (방향 압력 누적)
+      방안 3: 전체 호가창 균형 측정 (방향 압력 누적)
     """
     direction = direction.upper()
     if not books.get("available") or not books["bids"] or not books["asks"]:
@@ -402,7 +266,7 @@ def analyze_orderbook_imbalance(books: dict, direction: str, depth: int = 10) ->
         if total <= 0:
             return 0, ""
 
-        bid_ratio = total_bid / total   # 0.5 = 균형
+        bid_ratio = total_bid / total
         bid_pct   = round(bid_ratio * 100, 1)
         ask_pct   = round((1 - bid_ratio) * 100, 1)
 
@@ -435,46 +299,79 @@ def analyze_orderbook_imbalance(books: dict, direction: str, depth: int = 10) ->
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 방안 5: Candle Momentum / CVD Proxy  [★ v2.4 신규]
+# OHLCV 수집 (방안 4 Candle Momentum 전용)
+# [v3.3] OI 제거 후 순수 OHLCV만 수집
 # ══════════════════════════════════════════════════════════════════════════════
 
-def analyze_candle_momentum(oi_history: list, direction: str) -> Tuple[int, str]:
+def fetch_ohlcv_micro(exchange, symbol: str, periods: int = 12) -> list:
     """
-    ★ v2.4 신규: CVD Proxy — 캔들 방향 × body 크기 × 거래량 가중치
-    추가 API 없음: fetch_oi_history()가 반환하는 OHLCV 재사용
+    5분봉 OHLCV 수집 — Candle Momentum(방안 4) 전용.
+    [v3.3] fetch_oi_history 대체: OI 없이 OHLCV만 수집.
+    반환: [{open, high, low, close, volume, ts}, ...]
+    """
+    try:
+        swap  = _to_ccxt_swap(symbol)
+        ohlcv = exchange.fetch_ohlcv(swap, "5m", limit=periods)
+        result = [
+            {
+                "ts":     c[0],
+                "open":   float(c[1]),
+                "high":   float(c[2]),
+                "low":    float(c[3]),
+                "close":  float(c[4]),
+                "volume": float(c[5]),
+            }
+            for c in ohlcv
+        ]
+        logger.debug(f"[Micro/OHLCV] {len(result)}캔들 수집 ({symbol})")
+        return result
+    except Exception as e:
+        logger.warning(f"[Micro/OHLCV] 수집 실패 ({symbol}): {e}")
+        return []
 
-    계산 방식:
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 방안 4: Candle Momentum / CVD Proxy  (기존 방안 5)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def analyze_candle_momentum(ohlcv_micro: list, direction: str) -> Tuple[int, str]:
+    """
+    CVD Proxy — 캔들 방향 × body 크기 × 거래량 가중치.
+
+    계산:
       각 캔들: bull_weight = max(0, (close-open)/(high-low)) × volume
-              bear_weight = max(0, (open-close)/(high-low)) × volume
-      최근 캔들에 시간 가중치 부여 (1~5, 최신=5)
+               bear_weight = max(0, (open-close)/(high-low)) × volume
+      최신 캔들에 높은 시간 가중치 (i+1, i=0이 가장 오래됨)
       mom_score = weighted_bull / (weighted_bull + weighted_bear)
 
-    신호 기준:
-      > 0.65: 매수 모멘텀 → 롱 유리
-      < 0.35: 매도 모멘텀 → 숏 유리
+    기준:
+      > 0.65: 매수 모멘텀  → 롱 유리
+      < 0.35: 매도 모멘텀  → 숏 유리
     """
     direction = direction.upper()
-    # open/volume 필드 포함 여부 확인 (CCXT 성공 경로 or 폴백 경로 모두 포함)
-    if (len(oi_history) < 3 or
-            "open" not in oi_history[0] or
-            "volume" not in oi_history[0]):
+    if (len(ohlcv_micro) < 3 or
+            "open" not in ohlcv_micro[0] or
+            "volume" not in ohlcv_micro[0]):
         return 0, ""
+
     try:
-        recent = oi_history[-5:]   # 최근 5캔들
+        recent = ohlcv_micro[-5:]
         w_bull = 0.0; w_bear = 0.0
 
         for i, c in enumerate(recent):
-            o, h, l, cl, vol = (
-                c.get("open", 0), c.get("high", cl := c["close"]),
-                c.get("low",  cl), c["close"], c.get("volume", 1.0)
-            )
+            o   = c.get("open",   c["close"])
+            h   = c.get("high",   c["close"])
+            l   = c.get("low",    c["close"])
+            cl  = c["close"]
+            vol = c.get("volume", 1.0)
+
             rng = h - l
             if rng <= 0 or vol <= 0:
                 continue
 
-            body_bull = max(0.0, (cl - o) / rng)   # 양봉 비율
-            body_bear = max(0.0, (o - cl) / rng)   # 음봉 비율
-            weight    = (i + 1) * vol               # 최신 캔들 가중치 높음
+            body_bull = max(0.0, (cl - o) / rng)
+            body_bear = max(0.0, (o - cl) / rng)
+            weight    = (i + 1) * vol
 
             w_bull += body_bull * weight
             w_bear += body_bear * weight
@@ -483,7 +380,7 @@ def analyze_candle_momentum(oi_history: list, direction: str) -> Tuple[int, str]
         if total <= 0:
             return 0, ""
 
-        mom_score = w_bull / total   # 0~1, 0.5=중립
+        mom_score = w_bull / total
         mom_pct   = round(mom_score * 100, 1)
 
         p, r = 0, ""
@@ -515,13 +412,14 @@ def analyze_candle_momentum(oi_history: list, direction: str) -> Tuple[int, str]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 방안 6: Mark Price Basis + Next Funding Rate  [★ v2.4: 임계값 수정]
+# 방안 5: Mark Price Basis + Next Funding Rate  (기존 방안 6)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_mark_funding_data(exchange, symbol: str) -> dict:
-    """마크 가격 + 펀딩비 직접 HTTP 호출"""
-    res = {"mark_price": None, "current_funding_rate": None,
-           "next_funding_rate": None, "available": False}
+    res = {
+        "mark_price": None, "current_funding_rate": None,
+        "next_funding_rate": None, "available": False,
+    }
     try:
         resp = _okx_get("/public/mark-price", {
             "instType": "SWAP",
@@ -541,25 +439,25 @@ def fetch_mark_funding_data(exchange, symbol: str) -> dict:
     except Exception as e:
         logger.warning(f"[Micro/MF] 펀딩비 실패: {e}")
 
-    res["available"] = res["mark_price"] is not None or res["next_funding_rate"] is not None
+    res["available"] = (res["mark_price"] is not None or
+                        res["next_funding_rate"] is not None)
     return res
 
 
-def analyze_mark_funding_composite(mf: dict, current_price: float, direction: str) -> Tuple[int, str]:
+def analyze_mark_funding_composite(mf: dict, current_price: float,
+                                    direction: str) -> Tuple[int, str]:
     """
-    ★ v2.4: 펀딩비 임계값 전면 수정
-    기존: nf > 0.030 (3%)  → 사실상 절대 발동 불가
-    수정: nf > 0.003 (0.3%)→ 실제 시장 수준에 맞게 조정
+    마크가격 괴리 + 차기 펀딩비 복합 분석.
 
-    OKX 실제 펀딩비 스케일 (소수):
+    OKX 실제 펀딩비 스케일:
       평상시: ±0.0001 ~ ±0.0005 (±0.01% ~ ±0.05%)
-      상승장: +0.001 ~ +0.005   (+0.1% ~ +0.5%)
+      상승장: +0.001  ~ +0.005  (+0.1% ~ +0.5%)
       극단:   > +0.01            (> 1%)
 
-    임계값 재설정:
-      mild:   |nf| > 0.0005  (0.05% — 롱쏠림 시작)
-      strong: |nf| > 0.001   (0.1%  — 명확한 방향 편향)
-      extreme:|nf| > 0.003   (0.3%  — 강한 청산 위험)
+    임계값:
+      mild:    |nf| > 0.0005  (0.05% — 방향 편향 시작)
+      strong:  |nf| > 0.001   (0.1%  — 명확한 편향)
+      extreme: |nf| > 0.003   (0.3%  — 강한 청산 위험)
     """
     direction = direction.upper()
     if not mf.get("available"):
@@ -567,7 +465,7 @@ def analyze_mark_funding_composite(mf: dict, current_price: float, direction: st
 
     p = 0; parts = []
 
-    # ── 마크가격 괴리 ──────────────────────────────────────────
+    # 마크가격 괴리
     mark = mf.get("mark_price")
     if mark and mark > 0 and current_price > 0:
         basis = (current_price - mark) / mark
@@ -582,7 +480,7 @@ def analyze_mark_funding_composite(mf: dict, current_price: float, direction: st
             elif basis < -0.002: p -= 4;  parts.append(f"마크괴리{basis:.3%}")
             elif basis >  0.003: p += 5;  parts.append(f"✅마크프리미엄({basis:.3%})")
 
-    # ── 차기 펀딩비 (★ 임계값 수정) ───────────────────────────
+    # 차기 펀딩비
     nf = mf.get("next_funding_rate")
     if nf is not None:
         if direction == "LONG":
@@ -598,23 +496,24 @@ def analyze_mark_funding_composite(mf: dict, current_price: float, direction: st
             elif nf >  0.001:  p += 5;  parts.append(f"✅차기펀딩숏유리 {nf*100:+.4f}%")
             elif nf >  0.0005: p += 3;  parts.append(f"✅차기펀딩소폭숏유리 {nf*100:+.4f}%")
 
-    # ── 복합 불리: 마크괴리 + 펀딩비 같은 방향 ────────────────
+    # 복합 불리: 마크괴리 + 펀딩비 동일 방향
     if mark and mark > 0 and nf is not None and current_price > 0:
         basis = (current_price - mark) / mark
-        if   direction == "LONG"  and basis > 0.002 and nf > 0.0005: p -= 3; parts.append("복합불리↑")
-        elif direction == "SHORT" and basis < -0.002 and nf < -0.0005:p -= 3; parts.append("복합불리↓")
+        if   direction == "LONG"  and basis > 0.002 and nf > 0.0005:
+            p -= 3; parts.append("복합불리↑")
+        elif direction == "SHORT" and basis < -0.002 and nf < -0.0005:
+            p -= 3; parts.append("복합불리↓")
 
-    return p, " | ".join(f"[MF]{x}" for x in parts) if parts else ""
+    return p, (" | ".join(f"[MF]{x}" for x in parts) if parts else "")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 방안 7: Account-Level vs Position-Level LS Divergence
+# 방안 6: Account-Level vs Position-Level LS Divergence  (기존 방안 7)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_account_ls_ratio(exchange, symbol: str) -> Optional[float]:
     """
     OKX: GET /api/v5/rubik/stat/contracts/long-short-account-ratio
-    파라미터: ccy (필수) — instId 미지원
     반환: 계좌 기준 롱 비율 (0.0 ~ 1.0)
     """
     try:
@@ -638,19 +537,18 @@ def fetch_account_ls_ratio(exchange, symbol: str) -> Optional[float]:
         return None
 
 
-def analyze_ls_divergence(
-    account_long_pct: Optional[float],
-    position_long_pct: float,
-    direction: str,
-) -> Tuple[int, str]:
+def analyze_ls_divergence(account_long_pct: Optional[float],
+                           position_long_pct: float,
+                           direction: str) -> Tuple[int, str]:
     """
-    계좌 기준 vs 포지션 기준 롱 비율 괴리 → 고래 포지션 방향 추정
+    계좌 기준 vs 포지션 기준 롱 비율 괴리 → 고래 포지션 방향 추정.
     account > position: 소액 계좌가 롱 주도, 고래는 숏
     account < position: 고래 계좌가 롱 주도
     """
     direction = direction.upper()
     if account_long_pct is None:
         return 0, ""
+
     div = account_long_pct - position_long_pct
     s   = f"계좌:{account_long_pct:.1%} 포지션:{position_long_pct:.1%} 괴리:{div:+.1%}"
     p, r = 0, ""
@@ -670,43 +568,47 @@ def analyze_ls_divergence(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 통합 수집
+# 통합 수집  [v3.3: OI 제거, ohlcv_micro 키 사용]
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_all_microstructure(exchange, symbol: str) -> dict:
     """
-    6개 데이터 포인트 수집.
-    oi_history에 OHLCV 포함 → 방안 5 추가 API 호출 없음.
+    5개 데이터 포인트 수집 (OI 제거됨).
+
+    데이터:
+      liquidation  → 방안 1 (Liq Cascade)
+      orderbook    → 방안 2 (OB Wall) + 방안 3 (OBI)
+      ohlcv_micro  → 방안 4 (Candle Momentum)
+      mark_funding → 방안 5 (Mark/Funding)
+      account_ls   → 방안 6 (LS Divergence)
     """
     logger.info(f"[Microstructure] 📡 수집: {symbol}")
 
-    liq_data  = fetch_liquidation_data(exchange, symbol)
-    ob_data   = fetch_orderbook_data(exchange, symbol)
-    oi_data   = fetch_oi_history(exchange, symbol)       # OHLCV 포함
-    mf_data   = fetch_mark_funding_data(exchange, symbol)
-    acct_ls   = fetch_account_ls_ratio(exchange, symbol)
+    liq_data   = fetch_liquidation_data(exchange, symbol)
+    ob_data    = fetch_orderbook_data(exchange, symbol)
+    ohlcv_data = fetch_ohlcv_micro(exchange, symbol)         # OI 없이 OHLCV만
+    mf_data    = fetch_mark_funding_data(exchange, symbol)
+    acct_ls    = fetch_account_ls_ratio(exchange, symbol)
 
     data = {
         "liquidation":  liq_data,
         "orderbook":    ob_data,
-        "oi_history":   oi_data,   # {oi, close, ts, open, high, low, volume}
+        "ohlcv_micro":  ohlcv_data,   # [v3.3] oi_history → ohlcv_micro
         "mark_funding": mf_data,
         "account_ls":   acct_ls,
     }
 
-    # 방안별 활성 상태 (7분석 / 6데이터)
     status = {
-        "Liq":  liq_data.get("available", False),
-        "OB":   ob_data.get("available",  False),
-        "OI":   len(oi_data) > 0,
-        "CM":   len(oi_data) > 0 and "open" in (oi_data[0] if oi_data else {}),
-        "MF":   mf_data.get("available",  False),
-        "LS":   acct_ls is not None,
+        "Liq": liq_data.get("available", False),
+        "OB":  ob_data.get("available",  False),
+        "CM":  len(ohlcv_data) > 0 and "open" in (ohlcv_data[0] if ohlcv_data else {}),
+        "MF":  mf_data.get("available",  False),
+        "LS":  acct_ls is not None,
     }
     ok = sum(status.values())
-    logger.info(f"[Microstructure] ✅ {ok}/6 방안 활성  {status}")
+    logger.info(f"[Microstructure] ✅ {ok}/5 방안 활성  {status}")
 
-    if ok < 6:
+    if ok < 5:
         failed = [k for k, v in status.items() if not v]
         logger.info(f"[Microstructure] ⚠️ 비활성: {failed}")
 
@@ -714,7 +616,7 @@ def fetch_all_microstructure(exchange, symbol: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 통합 패널티 계산
+# 통합 패널티 계산  [v3.3: 6개 방안, OI 제거]
 # ══════════════════════════════════════════════════════════════════════════════
 
 def compute_microstructure_penalties(
@@ -723,13 +625,17 @@ def compute_microstructure_penalties(
     direction:         str,
     regime:            str,
     percent_b:         float,
-    taker_buy_pct:     float,   # 0~100 스케일
-    position_long_pct: float,   # 0~1 스케일
+    taker_buy_pct:     float,
+    position_long_pct: float,
 ) -> dict:
     """
-    7개 분석 → 패널티/보너스 합산.
-    방안 4: BB Compat 제거 → OB Volume Imbalance 교체
-    방안 5: Candle Momentum 신규 추가
+    6개 분석 → 패널티/보너스 합산 후 캡(-30pt) 적용.
+
+    마이크로구조 패널티는 소프트 패널티(×배율) 이후 덧셈 적용:
+      final_score = (base + bonus) × soft_penalty + micro_penalty
+    → 독립적 order flow 근거로 partial rescue/block 허용 (의도적 설계).
+    → 방향 역풍이면 BOS ×0.82 이후에도 추가 차감.
+    → 방향 순풍이면 partial offset — 진짜 order flow 확인 시 합리적.
     """
     direction = direction.upper()
     checks = []; suggested = None
@@ -738,44 +644,45 @@ def compute_microstructure_penalties(
     p1, r1 = analyze_liquidation_cascade(
         micro_data.get("liquidation", {}), taker_buy_pct, direction
     )
-    if r1: checks.append(("LiqCascade", p1, r1))
+    if r1:
+        checks.append(("LiqCascade", p1, r1))
 
     # 방안 2: Order Book Wall
     p2, r2, entry = analyze_orderbook_pressure(
         micro_data.get("orderbook", {}), current_price, direction
     )
-    if r2: checks.append(("OrderBook", p2, r2))
-    if entry: suggested = entry
+    if r2:
+        checks.append(("OrderBook", p2, r2))
+    if entry:
+        suggested = entry
 
-    # 방안 3: OI Velocity
-    p3, r3 = analyze_oi_velocity(
-        micro_data.get("oi_history", []), direction, regime
-    )
-    if r3: checks.append(("OIVelocity", p3, r3))
-
-    # 방안 4: OB Volume Imbalance (★ 교체)
-    p4, r4 = analyze_orderbook_imbalance(
+    # 방안 3: OB Volume Imbalance
+    p3, r3 = analyze_orderbook_imbalance(
         micro_data.get("orderbook", {}), direction
     )
-    if r4: checks.append(("OBImbalance", p4, r4))
+    if r3:
+        checks.append(("OBImbalance", p3, r3))
 
-    # 방안 5: Candle Momentum (★ 신규)
-    p5, r5 = analyze_candle_momentum(
-        micro_data.get("oi_history", []), direction
+    # 방안 4: Candle Momentum (ohlcv_micro 키 사용)
+    p4, r4 = analyze_candle_momentum(
+        micro_data.get("ohlcv_micro", []), direction
     )
-    if r5: checks.append(("CandleMom", p5, r5))
+    if r4:
+        checks.append(("CandleMom", p4, r4))
 
-    # 방안 6: Mark Price + Funding Rate
-    p6, r6 = analyze_mark_funding_composite(
+    # 방안 5: Mark Price + Funding Rate
+    p5, r5 = analyze_mark_funding_composite(
         micro_data.get("mark_funding", {}), current_price, direction
     )
-    if r6: checks.append(("MarkFunding", p6, r6))
+    if r5:
+        checks.append(("MarkFunding", p5, r5))
 
-    # 방안 7: LS Divergence
-    p7, r7 = analyze_ls_divergence(
+    # 방안 6: LS Divergence
+    p6, r6 = analyze_ls_divergence(
         micro_data.get("account_ls"), position_long_pct, direction
     )
-    if r7: checks.append(("LSDivergence", p7, r7))
+    if r6:
+        checks.append(("LSDivergence", p6, r6))
 
     raw   = sum(p for _, p, _ in checks)
     total = max(raw, MICRO_PENALTY_CAP)
