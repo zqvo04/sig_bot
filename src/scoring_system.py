@@ -395,6 +395,42 @@ def calculate_entry_score(analysis: dict, direction: str,
     if _taker_against:
         bonuses = [(n, round(v*0.40) if n in _CANDLE else v) for n,v in bonuses]
 
+    # ── 저유동성 구조 패턴 보너스 억제 ─────────────────────────────
+    # 설계 근거:
+    #   vol_ratio < 0.30 (현재 거래량 < 평균의 30%)이면
+    #   가격 구조 패턴과 다이버전스의 신뢰도가 크게 저하됨.
+    #   → 해당 보너스를 50%로 감산.
+    #
+    # 억제 대상: 가격 구조/패턴 기반 보너스 (거래량 확인 필요)
+    # 억제 제외: 펀딩비, 롱숏, 피보, FVG, BOS, 눌림목 (가격/심리 기반)
+    #
+    # 임계값 0.30: SUI(0.0x)/SOL(0.04x) 케이스에서 검증됨
+    #   → vol_ratio = 0.30 이면 50%, 0.14 이면 50%, 0.0 이면 50%
+    #   (연속 구간 패널티가 아닌 단일 임계값 — 단순성 우선)
+    _LOW_VOL_STRUCT = {
+        "LowerHigh구조", "HigherLow구조",
+        "돌파실패",       "붕괴실패",
+        "거래량강세다이버전스", "거래량약세다이버전스",
+        "볼린저극단+RSI다이버전스",
+    }
+    vol_ratio = vol.get("ratio", 1.0)
+    if vol_ratio < 0.30:
+        affected = [(n, v) for n, v in bonuses if n in _LOW_VOL_STRUCT]
+        if affected:
+            bonuses = [
+                (n, round(v * 0.5) if n in _LOW_VOL_STRUCT else v)
+                for n, v in bonuses
+            ]
+            before_sum = sum(v for _, v in affected)
+            after_sum  = sum(
+                round(v * 0.5) for _, v in affected
+            )
+            logger.info(
+                f"[저유동성/{d.upper()}] vol:{vol_ratio:.2f}x < 0.30 "
+                f"→ 구조패턴 보너스 {before_sum}pt → {after_sum}pt (50% 감산) "
+                f"[{', '.join(n for n, _ in affected)}]"
+            )
+
     # ── 티어드 보너스 캡 ─────────────────────────────────────────
     bonus_raw   = sum(v for _,v in bonuses)
     bonus_cap   = _get_tiered_bonus_cap(base_score)
