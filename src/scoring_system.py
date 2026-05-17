@@ -1,20 +1,26 @@
 """
-scoring_system.py — 점수 산출 (v3.1)
-────────────────────────────────────────────────────────────────────────
-[v3 주요 변경]
-1. ADX 배율 제거: EMA 배율이 이미 방향 불확실성 반영 → ADX 이중 억제 제거
-2. RANGING EMA 3역방향: 0.72 → 0.82 (반등 신호 허용)
-3. 보너스 18개로 정리 (중복/노이즈 11개 제거)
-4. 보너스 캡: tiered (36/18, 44/26, ∞/36)
-5. 극단 과매도 보너스 10pt 추가, BB streak 면제 조건 추가
-6. 보너스 개별 값 하향 조정 (과적합 방지)
+scoring_system.py — 점수 산출 (v3.3)
+────────────────────────────────────────────────────────────────────
+[v3.3 개선]
 
-[v3.1 OI 제거]
-- scores dict에서 oi_change 제거 (weights에도 없음)
-- OI 스파이크 필터 제거 (oi_change 항상 available:False)
-- 추세지속 보너스: EMA+OI+Taker → EMA+Taker (OI 조건 제거)
-- 보너스 이름: "추세지속:EMA+OI+Taker" → "추세지속:EMA+Taker"
-────────────────────────────────────────────────────────────────────────
+① base_score 유령 계산 제거
+   기존: base_score에 mtf_penalty, exhaustion_mult를 중간에 곱산 적용했지만
+         최종 공식은 base_before_soft를 사용 → 수정된 base_score는 사실상 미사용
+         (로깅에만 사용, 최종 결과에 미영향)
+   수정: base_score 단일 변수로 통합 (base_before_soft 별칭 제거)
+         중간 수정 없이 soft_penalty 체인에서 일괄 적용
+   효과: 변수 흐름 명확, "수정됐지만 무시됨" 코드 패턴 제거
+
+② SIGNAL_MIN_SCORE 제거
+   기존: signal = (score >= regime_threshold) AND (score >= SIGNAL_MIN_SCORE=63)
+         → 실질 max(regime, 63), 국면별 임계값 무의미
+   수정: signal = (score >= regime_threshold) 단독
+         국면별 임계값이 실제로 작동 (SQUEEZE/EXPLOSIVE 65, TRENDING 63, RANGING 62)
+
+[v3.2] BOS_CONFLICT_PENALTY ×0.82 추가
+[v3.1] OI 제거
+[v3]   ADX 배율 제거, EMA 배율 통합
+────────────────────────────────────────────────────────────────────
 """
 import json, logging, os
 from datetime import datetime, timezone, timedelta
@@ -24,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 
 def _get_tiered_bonus_cap(base_score: float) -> int:
-    """base 점수 구간별 보너스 상한"""
     for threshold, cap in config.BONUS_CAP_TIERS:
         if base_score < threshold:
             return cap
@@ -46,27 +51,23 @@ def calculate_entry_score(analysis: dict, direction: str,
     vol     = analysis.get("volume",       {})
     adx_15m = analysis.get("adx_15m",     {})
     regime  = analysis.get("regime",       {})
-    # oi_change는 항상 {"available": False} — scores/weights에서 제거됨
-    # 하위 호환용으로만 참조 (청산프록시 상충 판단 등)
-    oi      = analysis.get("oi_change",    {})
 
     ema_info      = analysis.get(f"ema_{d}", {})
     reverse_count = ema_info.get("reverse_count", 0)
 
-    # RSI 값 추출
-    rsi_val_15m = rsi.get("value",    50.0)
-    rsi_val_1h  = rsi.get("value_1h", 50.0)
-    rsi_val_4h  = rsi.get("value_4h", 50.0)
+    rsi_val_15m  = rsi.get("value",    50.0)
+    rsi_val_1h   = rsi.get("value_1h", 50.0)
+    rsi_val_4h   = rsi.get("value_4h", 50.0)
     bb_state_str = bb.get("state", "")
 
-    # ── 가중합 계산 (oi_change 제거됨) ──────────────────────────
+    # ── 가중합 ───────────────────────────────────────────────────
     scores = {
         "rsi":              rsi.get(f"{d}_score",     50.0),
         "bollinger":        bb.get(f"{d}_score",      50.0),
         "funding_rate":     funding.get(f"{d}_score", 50.0),
         "long_short_ratio": ls.get(f"{d}_score",      50.0),
         "taker_volume":     taker.get(f"{d}_score",   50.0),
-        "volume":           vol.get("score",           0.0),
+        "volume":           vol.get("score",          50.0),  # [v3.3] 기본값 50 (정규화 후)
     }
 
     regime_name = regime.get("regime", "UNKNOWN")
@@ -86,7 +87,7 @@ def calculate_entry_score(analysis: dict, direction: str,
 
     raw_score = sum(scores[k] * weights[k] for k in weights)
 
-    # ── EMA 배율 적용 (유일한 배율 패널티) ──────────────────────
+    # ── EMA 배율 ─────────────────────────────────────────────────
     ema_table = config.REGIME_EMA_MULTIPLIERS.get(regime_name, config.EMA_MULTIPLIER)
     ema_mult  = ema_table.get(reverse_count, 1.0)
     logger.info(f"[EMA배율/{d.upper()}] {ema_info.get('tf_signals',{})} → ×{ema_mult:.2f}  [{regime_name}]")
@@ -118,11 +119,14 @@ def calculate_entry_score(analysis: dict, direction: str,
             f"15m:{rsi_val_15m:.0f} 1h:{rsi_val_1h:.0f} 4h:{rsi_val_4h:.0f} BB:{bb_state_str}"
         )
 
-    # base (게이트 패널티까지)
-    base_score       = raw_score * ema_mult * gate_penalty
-    base_before_soft = base_score
+    # ── base_score (v3.3: 단일 변수, 중간 수정 없음) ──────────────
+    # 기존의 base_before_soft / base_score 이중 변수 구조를 단일화.
+    # MTF RSI / exhaustion 패널티는 soft_penalty 체인에서 일괄 적용.
+    # 중간에 base_score를 수정한 뒤 최종 공식에서 원본 값을 쓰는
+    # "유령 계산" 패턴을 제거했음.
+    base_score = raw_score * ema_mult * gate_penalty
 
-    # ── MTF RSI 극단값 패널티 (soft) ─────────────────────────────
+    # ── soft 패널티 계산 (로그만, base_score 수정 없음) ──────────
     rsi_1h = rsi_val_1h
     rsi_4h = rsi_val_4h
     mtf_penalty = 1.0; mtf_penalty_reason = None
@@ -149,10 +153,8 @@ def calculate_entry_score(analysis: dict, direction: str,
             mtf_penalty_reason = f"MTF RSI 약과매도(1h:{rsi_1h:.1f}) → 숏 ×{mtf_penalty}"
 
     if mtf_penalty < 1.0:
-        base_score *= mtf_penalty
         logger.info(f"[MTF-RSI/{d.upper()}] {mtf_penalty_reason}")
 
-    # ── EXPLOSIVE 소진 패널티 ────────────────────────────────────
     exhaustion_mult = 1.0; exhaustion_reason = None
     if regime_name == "EXPLOSIVE":
         if d == "long" and rsi_1h >= config.EXPLOSIVE_EXHAUSTION_RSI_LONG:
@@ -162,7 +164,6 @@ def calculate_entry_score(analysis: dict, direction: str,
             exhaustion_mult = config.EXPLOSIVE_EXHAUSTION_PENALTY
             exhaustion_reason = f"EXPLOSIVE 소진(1h RSI:{rsi_1h:.1f}) → 숏 ×{exhaustion_mult}"
     if exhaustion_mult < 1.0:
-        base_score *= exhaustion_mult
         logger.info(f"[EXPLOSIVE소진/{d.upper()}] {exhaustion_reason}")
 
     # ── BB 연속 이탈 억제 ────────────────────────────────────────
@@ -173,19 +174,13 @@ def calculate_entry_score(analysis: dict, direction: str,
 
     if d == "long" and lower_streak >= BB_STREAK and regime_name == "TRENDING":
         if rsi_val_15m <= config.BB_STREAK_SUPPRESS_RSI_EXEMPT:
-            logger.info(
-                f"[BB억제면제/{d.upper()}] RSI극단({rsi_val_15m:.0f}≤{config.BB_STREAK_SUPPRESS_RSI_EXEMPT}) "
-                f"→ BB streak 억제 해제"
-            )
+            logger.info(f"[BB억제면제/{d.upper()}] RSI극단({rsi_val_15m:.0f}) → BB streak 억제 해제")
         else:
             bb_suppressed = True
             bb_reason = f"TRENDING BB 하단 {lower_streak}캔들 연속 이탈 — 롱 억제"
-
     elif d == "short" and upper_streak >= BB_STREAK and regime_name == "TRENDING":
         if rsi_val_15m >= (100 - config.BB_STREAK_SUPPRESS_RSI_EXEMPT):
-            logger.info(
-                f"[BB억제면제/{d.upper()}] RSI극단({rsi_val_15m:.0f}) → BB streak 억제 해제"
-            )
+            logger.info(f"[BB억제면제/{d.upper()}] RSI극단({rsi_val_15m:.0f}) → BB streak 억제 해제")
         else:
             bb_suppressed = True
             bb_reason = f"TRENDING BB 상단 {upper_streak}캔들 연속 이탈 — 숏 억제"
@@ -201,12 +196,12 @@ def calculate_entry_score(analysis: dict, direction: str,
             "breakdown": "⛔ BB 연속 이탈 억제",
         }
 
-    # ══════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════
     # 보너스 계산
-    # ══════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════
     bonuses = []
 
-    # ① 극단 과매도/과매수 보너스
+    # ① 극단 과매도/과매수
     if is_extreme_oversold:
         bonuses.append(("멀티TF극단과매도", config.BONUS_EXTREME_OVERSOLD_MTF))
         logger.info(f"[극단과매도보너스] ★ +{config.BONUS_EXTREME_OVERSOLD_MTF}pt")
@@ -248,11 +243,10 @@ def calculate_entry_score(analysis: dict, direction: str,
     ):
         bonuses.append(("대규모청산꼬리", config.BONUS_LIQUIDATION))
 
-    # ⑤ 추세 지속 (EMA+Taker 확인 — OI 제거됨)
+    # ⑤ 추세 지속 (EMA+Taker)
     ema_same   = ema_info.get("same_count", 0)
     taker_bias = taker.get("bias", "neutral")
     taker_str  = taker.get("strength", "neutral")
-
     trend_strong_ok = (
         ema_same == 3 and taker_str in ("strong", "mild") and (
             (d == "long"  and taker_bias == "buy_dominant") or
@@ -275,7 +269,6 @@ def calculate_entry_score(analysis: dict, direction: str,
         (d == "long"  and rsi.get("pullback_long_micro",  False) and not pb_ok_strong and not pb_ok_weak and ema_same >= 1) or
         (d == "short" and rsi.get("pullback_short_micro", False) and not pb_ok_strong and not pb_ok_weak and ema_same >= 1)
     )
-
     if pb_ok_strong:
         bonuses.append((f"눌림목강({d.upper()})", config.BONUS_PULLBACK_ENTRY))
         logger.info(f"[눌림목강] +{config.BONUS_PULLBACK_ENTRY}pt [{d.upper()}]")
@@ -308,7 +301,6 @@ def calculate_entry_score(analysis: dict, direction: str,
     bear_fvg = fvg.get("in_bearish_fvg", False)
     both_fvg = bull_fvg and bear_fvg
     fvg_val  = config.BONUS_FVG_ENTRY_CONFLICTED if both_fvg else config.BONUS_FVG_ENTRY
-
     if both_fvg:
         bonuses.append((f"FVG{'강세' if d=='long' else '약세'}진입(모호)", fvg_val))
         logger.info(f"[FVG] ⚠️ 양방향 동시 → 보너스 반감 +{fvg_val}pt")
@@ -319,7 +311,7 @@ def calculate_entry_score(analysis: dict, direction: str,
         bonuses.append(("FVG약세진입", fvg_val))
         logger.info(f"[FVG] ★ 숏 FVG +{fvg_val}pt")
 
-    # ⑩ BOS 확증
+    # ⑩ BOS 확증 (방향 일치 시 보너스, 방향 충돌 시 아래 패널티 섹션)
     bos_choch = analysis.get("bos_choch", {})
     if d == "long"  and bos_choch.get("bos_bullish"):
         bonuses.append(("BOS상승확증", config.BONUS_BOS_CONFIRM))
@@ -356,22 +348,21 @@ def calculate_entry_score(analysis: dict, direction: str,
     # ⑬ 캔들 패턴
     candle = analysis.get("candle_pattern", {})
     if d == "short":
-        if candle.get("bearish_pin"):        bonuses.append(("베어리시핀바",    config.BONUS_CANDLE_PIN_BAR))
-        elif candle.get("bearish_engulf"):   bonuses.append(("베어리시인걸핑",  config.BONUS_CANDLE_ENGULFING))
+        if candle.get("bearish_pin"):      bonuses.append(("베어리시핀바",   config.BONUS_CANDLE_PIN_BAR))
+        elif candle.get("bearish_engulf"): bonuses.append(("베어리시인걸핑", config.BONUS_CANDLE_ENGULFING))
     elif d == "long":
-        if candle.get("bullish_pin"):        bonuses.append(("불리시핀바",      config.BONUS_CANDLE_PIN_BAR))
-        elif candle.get("bullish_engulf"):   bonuses.append(("불리시인걸핑",    config.BONUS_CANDLE_ENGULFING))
+        if candle.get("bullish_pin"):      bonuses.append(("불리시핀바",     config.BONUS_CANDLE_PIN_BAR))
+        elif candle.get("bullish_engulf"): bonuses.append(("불리시인걸핑",   config.BONUS_CANDLE_ENGULFING))
 
     # ⑭ 거래량 폭발
-    atr_val   = analysis.get("atr", {})
     vol_ratio = vol.get("ratio", 1.0)
     adx_val   = adx_15m.get("adx", 0.0)
     if vol_ratio >= 2.5 and adx_val >= 22.0 and ema_same < 3:
         bonuses.append(("거래량폭발", config.BONUS_VOLUME_EXPLOSION))
 
     # ⑮ Post-Squeeze 모멘텀
-    prev_regime = analysis.get("prev_regime", "")
-    bb_state    = bb.get("state", "")
+    prev_regime   = analysis.get("prev_regime", "")
+    bb_state      = bb.get("state", "")
     bb_just_broke = (
         (d == "long"  and bb_state in ("upper_breakout","near_upper") and bb.get("upper_streak",0) == 1) or
         (d == "short" and bb_state in ("lower_breakout","near_lower") and bb.get("lower_streak",0) == 1)
@@ -395,7 +386,7 @@ def calculate_entry_score(analysis: dict, direction: str,
     if ema_all_reverse and not bb_reversal_exempt:
         bonuses = [(n, round(v*0.25) if n in _REV else v) for n,v in bonuses]
 
-    # ── Taker 역방향 시 캔들 보너스 감산 ───────────────────────
+    # ── Taker 역방향 시 캔들 보너스 감산 ────────────────────────
     _CANDLE = {"불리시핀바","베어리시핀바","불리시인걸핑","베어리시인걸핑"}
     _taker_against = (
         (d == "long"  and taker_bias == "sell_dominant") or
@@ -404,14 +395,14 @@ def calculate_entry_score(analysis: dict, direction: str,
     if _taker_against:
         bonuses = [(n, round(v*0.40) if n in _CANDLE else v) for n,v in bonuses]
 
-    # ── 티어드 보너스 캡 적용 ────────────────────────────────────
+    # ── 티어드 보너스 캡 ─────────────────────────────────────────
     bonus_raw   = sum(v for _,v in bonuses)
-    bonus_cap   = _get_tiered_bonus_cap(base_before_soft)
+    bonus_cap   = _get_tiered_bonus_cap(base_score)
     bonus_total = min(bonus_cap, bonus_raw)
     if bonus_raw > bonus_cap:
-        logger.info(f"[보너스캡] base:{base_before_soft:.0f}pt → 캡:{bonus_cap}pt ({bonus_raw}→{bonus_total}pt)")
+        logger.info(f"[보너스캡] base:{base_score:.0f}pt → 캡:{bonus_cap}pt ({bonus_raw}→{bonus_total}pt)")
 
-    # ── 연속캔들 모멘텀 역방향 패널티 ───────────────────────────
+    # ── 캔들 모멘텀 역방향 패널티 ───────────────────────────────
     candle_momentum_mult = 1.0
     if d == "short" and candle.get("consecutive_bull"):
         if regime_name == "TRENDING":    candle_momentum_mult = config.CANDLE_MOMENTUM_PENALTY_TRENDING
@@ -426,9 +417,9 @@ def calculate_entry_score(analysis: dict, direction: str,
             else:                            candle_momentum_mult = config.CANDLE_MOMENTUM_PENALTY_RANGING
             logger.info(f"[캔들모멘텀] 연속음봉 중 롱 ×{candle_momentum_mult:.2f}")
 
-    # ── CHoCH 역방향 패널티 ──────────────────────────────────────
-    choch_penalty = 1.0
-    bos_choch_data = analysis.get("bos_choch", {})
+    # ── CHoCH 역방향 패널티 (추세 전환 경고) ────────────────────
+    choch_penalty    = 1.0
+    bos_choch_data   = analysis.get("bos_choch", {})
     if d == "long"  and bos_choch_data.get("choch_bearish"):
         choch_penalty = config.CHOCH_AGAINST_PENALTY
         logger.info(f"[CHoCH/{d.upper()}] ⚠️ 하락전환 경고 중 롱 → ×{choch_penalty}")
@@ -436,18 +427,32 @@ def calculate_entry_score(analysis: dict, direction: str,
         choch_penalty = config.CHOCH_AGAINST_PENALTY
         logger.info(f"[CHoCH/{d.upper()}] ⚠️ 상승전환 경고 중 숏 → ×{choch_penalty}")
 
-    # ── 최종 점수 계산 ───────────────────────────────────────────
-    soft_penalty  = mtf_penalty * exhaustion_mult * candle_momentum_mult * choch_penalty
+    # ── BOS 역방향 패널티 (추세 구조 확증) ──────────────────────
+    # BOS(×0.82) > CHoCH(×0.88): 구조 "확증" > 전환 "경고"
+    # 보너스(⑩)와 상호 배타: 방향 일치 → +8pt, 방향 충돌 → ×0.82
+    bos_conflict_penalty = 1.0
+    if d == "long" and bos_choch_data.get("bos_bearish"):
+        bos_conflict_penalty = config.BOS_CONFLICT_PENALTY
+        logger.info(f"[BOS/{d.upper()}] ⚠️ 하락 BOS 확증 → 역추세 롱 ×{bos_conflict_penalty}")
+    elif d == "short" and bos_choch_data.get("bos_bullish"):
+        bos_conflict_penalty = config.BOS_CONFLICT_PENALTY
+        logger.info(f"[BOS/{d.upper()}] ⚠️ 상승 BOS 확증 → 역추세 숏 ×{bos_conflict_penalty}")
+
+    # ── 최종 점수 ────────────────────────────────────────────────
+    # soft_penalty 체인: MTF RSI × 소진 × 캔들모멘텀 × CHoCH × BOS충돌
+    # 마이크로구조는 별도 덧셈 (독립적 order flow 근거)
+    soft_penalty  = mtf_penalty * exhaustion_mult * candle_momentum_mult * choch_penalty * bos_conflict_penalty
     micro_penalty = micro_result.get("total_penalty", 0) if micro_result else 0
 
     final_score = round(
         min(100.0, max(0.0,
-            (base_before_soft + bonus_total) * soft_penalty + micro_penalty
+            (base_score + bonus_total) * soft_penalty + micro_penalty
         )), 2
     )
 
-    regime_threshold = regime.get("threshold", config.REGIME_THRESHOLDS.get("TRENDING", 62))
-    signal = (final_score >= regime_threshold and final_score >= config.SIGNAL_MIN_SCORE)
+    # [v3.3] SIGNAL_MIN_SCORE 제거: regime_threshold 단독 기준
+    regime_threshold = regime.get("threshold", config.REGIME_THRESHOLDS.get("TRENDING", 63))
+    signal = (final_score >= regime_threshold)
 
     # ── 로그 ─────────────────────────────────────────────────────
     micro_note   = f" +micro{micro_penalty:+d}pt" if micro_penalty != 0 else ""
@@ -457,13 +462,14 @@ def calculate_entry_score(analysis: dict, direction: str,
         logger.info(
             f"[Score/{d.upper()}] [{regime_name}]"
             f" raw:{raw_score:.1f} ×EMA{ema_mult:.2f}"
-            + (f" ×페널티{gate_penalty:.2f}" if gate_penalty < 1.0 else "")
-            + f" → base:{base_before_soft:.1f}pt"
-            f" → (base:{base_before_soft:.1f}+보너스{bonus_total}[cap:{bonus_cap}])"
-            + (f" ×MTF{mtf_penalty:.2f}"           if mtf_penalty < 1.0           else "")
-            + (f" ×소진{exhaustion_mult:.2f}"       if exhaustion_mult < 1.0       else "")
-            + (f" ×캔들{candle_momentum_mult:.2f}"  if candle_momentum_mult < 1.0  else "")
-            + (f" ×CHoCH{choch_penalty:.2f}"        if choch_penalty < 1.0         else "")
+            + (f" ×게이트{gate_penalty:.2f}" if gate_penalty < 1.0 else "")
+            + f" → base:{base_score:.1f}pt"
+            f" → (base:{base_score:.1f}+보너스{bonus_total}[cap:{bonus_cap}])"
+            + (f" ×MTF{mtf_penalty:.2f}"              if mtf_penalty < 1.0           else "")
+            + (f" ×소진{exhaustion_mult:.2f}"          if exhaustion_mult < 1.0       else "")
+            + (f" ×캔들{candle_momentum_mult:.2f}"     if candle_momentum_mult < 1.0  else "")
+            + (f" ×CHoCH{choch_penalty:.2f}"           if choch_penalty < 1.0         else "")
+            + (f" ×BOS충돌{bos_conflict_penalty:.2f}"  if bos_conflict_penalty < 1.0  else "")
             + micro_note
             + f" = {final_score:.1f}pt (임계:{regime_threshold}pt)"
             + (" 🚨 신호" if signal else "")
@@ -472,7 +478,7 @@ def calculate_entry_score(analysis: dict, direction: str,
         logger.info(
             f"[Score/{d.upper()}] [{regime_name}]"
             f" raw:{raw_score:.1f} ×EMA{ema_mult:.2f}"
-            + (f" ×페널티{gate_penalty:.2f}" if gate_penalty < 1.0 else "")
+            + (f" ×게이트{gate_penalty:.2f}" if gate_penalty < 1.0 else "")
             + f" +보너스{bonus_total}[cap:{bonus_cap}]"
             + micro_note
             + f" = {final_score:.1f}pt (임계:{regime_threshold}pt)"
@@ -481,7 +487,7 @@ def calculate_entry_score(analysis: dict, direction: str,
 
     breakdown = _build_breakdown(
         d, scores, weights, raw_score, ema_mult, gate_penalty,
-        mtf_penalty, exhaustion_mult, choch_penalty,
+        mtf_penalty, exhaustion_mult, choch_penalty, bos_conflict_penalty,
         bonuses, bonus_cap, final_score, gate, regime, micro_penalty
     )
     return {
@@ -493,12 +499,13 @@ def calculate_entry_score(analysis: dict, direction: str,
         "regime_threshold": regime_threshold, "breakdown": breakdown,
         "mtf_penalty": mtf_penalty, "exhaustion_mult": exhaustion_mult,
         "candle_momentum_mult": candle_momentum_mult, "choch_penalty": choch_penalty,
+        "bos_conflict_penalty": bos_conflict_penalty,
     }
 
 
 def _build_breakdown(d, scores, weights, raw, ema_m, pen,
-                     mtf_m, exh_m, choch_m, bonuses, bonus_cap,
-                     final, gate, regime, micro_penalty=0) -> str:
+                     mtf_m, exh_m, choch_m, bos_m,
+                     bonuses, bonus_cap, final, gate, regime, micro_penalty=0) -> str:
     label = "🟢 롱" if d == "long" else "🔴 숏"
     lines = [f"{label} 진입 점수  [{regime.get('icon','')} {regime.get('regime','')}]"]
     for key, weight in weights.items():
@@ -507,11 +514,12 @@ def _build_breakdown(d, scores, weights, raw, ema_m, pen,
         lines.append(f"  {_score_label(key):<14} {bar} {s:>5.1f}pt × {weight:.0%} = {contrib:>4.1f}pt")
     lines.append(f"  {'─'*46}")
     lines.append(f"  가중합                           {raw:>5.1f}pt")
-    if ema_m < 1.0: lines.append(f"  EMA 역방향 배율      × {ema_m:.2f}")
-    if pen  < 1.0:  lines.append(f"  복합 페널티          × {pen:.2f}")
-    if mtf_m  < 1.0: lines.append(f"  MTF RSI 패널티       × {mtf_m:.2f}")
-    if exh_m  < 1.0: lines.append(f"  EXPLOSIVE 소진 패널티× {exh_m:.2f}")
-    if choch_m< 1.0: lines.append(f"  CHoCH 역방향 패널티  × {choch_m:.2f}")
+    if ema_m   < 1.0: lines.append(f"  EMA 역방향 배율         × {ema_m:.2f}")
+    if pen     < 1.0: lines.append(f"  복합 페널티             × {pen:.2f}")
+    if mtf_m   < 1.0: lines.append(f"  MTF RSI 패널티          × {mtf_m:.2f}")
+    if exh_m   < 1.0: lines.append(f"  EXPLOSIVE 소진 패널티   × {exh_m:.2f}")
+    if choch_m < 1.0: lines.append(f"  CHoCH 역방향 패널티     × {choch_m:.2f}")
+    if bos_m   < 1.0: lines.append(f"  BOS 역방향 패널티       × {bos_m:.2f}")
     if bonuses:
         lines.append(f"  보너스 (상한:{bonus_cap}pt):")
         for name, val in bonuses:
@@ -519,7 +527,7 @@ def _build_breakdown(d, scores, weights, raw, ema_m, pen,
     if micro_penalty != 0:
         lines.append(f"  마이크로구조 패널티       {micro_penalty:+d}pt")
     lines.append(f"  {'─'*46}")
-    lines.append(f"  최종 (임계:{regime.get('threshold',60)}pt)  {final:>5.1f}pt")
+    lines.append(f"  최종 (임계:{regime.get('threshold',63)}pt)  {final:>5.1f}pt")
     return "\n".join(lines)
 
 
@@ -614,7 +622,7 @@ def _save_prev_regime(symbol: str, regime_name: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════
-# 파이프라인 (main.py 진입점)
+# 파이프라인
 # ══════════════════════════════════════════════════════════════
 
 def run_scoring_pipeline(symbol: str, analysis: dict,
@@ -632,7 +640,6 @@ def run_scoring_pipeline(symbol: str, analysis: dict,
         analysis["prev_regime"] = prev_regime
         logger.info(f"  이전 국면: {prev_regime}")
 
-    # 마이크로구조 패널티 계산
     micro_long  = {"total_penalty": 0, "raw_total": 0, "details": [], "suggested_entry": None}
     micro_short = {"total_penalty": 0, "raw_total": 0, "details": [], "suggested_entry": None}
 
@@ -669,8 +676,6 @@ def run_scoring_pipeline(symbol: str, analysis: dict,
         if is_in_cooldown(symbol, primary, current_price):
             cooldown = True
             logger.info(f"[Pipeline] {symbol} {primary.upper()} — 쿨다운 스킵")
-        elif ps < config.SIGNAL_MIN_SCORE:
-            logger.info(f"[Pipeline] {symbol} {primary.upper()} {ps:.1f}pt — 최소점수({config.SIGNAL_MIN_SCORE}pt) 미달")
         else:
             should_notify = True
             logger.info(f"[Pipeline] ✅ {symbol} {primary.upper()} {ps:.1f}pt — 알림 예정")
