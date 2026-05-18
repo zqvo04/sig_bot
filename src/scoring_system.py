@@ -1,28 +1,32 @@
 """
-scoring_system.py — 점수 산출 (v3.3)
+scoring_system.py — 점수 산출 (v3.4)
 ────────────────────────────────────────────────────────────────────
-[v3.3 개선]
+[v3.4 추가]
 
-① base_score 유령 계산 제거
-   기존: base_score에 mtf_penalty, exhaustion_mult를 중간에 곱산 적용했지만
-         최종 공식은 base_before_soft를 사용 → 수정된 base_score는 사실상 미사용
-   수정: base_score 단일 변수로 통합, soft_penalty 체인에서 일괄 적용
+⑦ EXPLOSIVE + BOS 역방향 강화 페널티
+   조건: regime == EXPLOSIVE AND bos_conflict_penalty < 1.0
+   적용: soft_penalty 체인에 ×EXPLOSIVE_BOS_CONFLICT_PENALTY(0.85) 추가
+   합산: ×0.82(BOS충돌) × ×0.85(추가) = ×0.697
 
-② SIGNAL_MIN_SCORE 제거
-   기존: signal = (score >= regime_threshold) AND (score >= SIGNAL_MIN_SCORE=63)
-         → 실질 max(regime, 63), 국면별 임계값 무의미
-   수정: signal = (score >= regime_threshold) 단독
+⑧ ADX 연동 역추세 임계값 조정
+   조건: ema_all_reverse AND NOT bb_reversal_exempt
+   적용: ADX 강도에 따라 regime_threshold 동적 상향 (최대 +15pt)
+     ADX >= 45 → +15pt / ADX >= 35 → +10pt / ADX >= 25 → +5pt
+   위치: final_score 산출 후, signal 판정 직전
 
-③ 거래량 페널티 추가 (v3.3 patch)
-   volume 가중치 5~9%로 낮아 보너스 하나로 상쇄 가능.
-   vol score 기준 명시적 덧셈 페널티:
-     score <  5pt (ratio <  10%) → -7pt
-     score < 15pt (ratio <  30%) → -3pt
-     score ≥ 15pt                →  0pt
-   적용 공식:
-     final_score = (base + bonus) × soft_penalty + micro_penalty + volume_penalty
+⑨ 역추세 보너스 캡 분리
+   조건: bos_conflict_penalty < 1.0 AND ema_all_reverse AND NOT bb_reversal_exempt
+   적용: 기존 티어드 캡 대신 COUNTER_TREND_BONUS_CAP(14pt) 강제 적용
+   설계: BOS역방향만 → 티어드 캡 유지 (조기 전환 가능성 보존)
+         BOS+EMA 둘 다 역방향 → 14pt 강제 (진정 역추세 보너스 제한)
 
-[v3.2] BOS_CONFLICT_PENALTY ×0.82 추가
+⑩ FVG 양방향 모호 + 저거래량 신호 차단
+   조건: in_bullish_fvg AND in_bearish_fvg AND vol_score < 30pt
+   적용: signal = False (이미 통과한 신호를 사후 차단)
+   옵션 A: 거래량이 충분(30pt+)하면 FVG 양방향이어도 유지
+
+[v3.3] base_score 유령계산 제거, SIGNAL_MIN_SCORE 제거, 거래량 패널티, lookback 개선
+[v3.2] BOS_CONFLICT_PENALTY ×0.82
 [v3.1] OI 제거
 [v3]   ADX 배율 제거, EMA 배율 통합
 ────────────────────────────────────────────────────────────────────
@@ -195,7 +199,7 @@ def calculate_entry_score(analysis: dict, direction: str,
             "bonuses": [], "bonus_total": 0, "gate_info": gate,
             "bb_suppressed": True, "bb_suppress_reason": bb_reason, "regime": regime,
             "breakdown": "⛔ BB 연속 이탈 억제",
-            "volume_penalty": 0,
+            "volume_penalty": 0, "explosive_bos_penalty": 1.0,
         }
 
     # ══════════════════════════════════════════════════════════════
@@ -420,12 +424,33 @@ def calculate_entry_score(analysis: dict, direction: str,
                 f"[{', '.join(n for n, _ in affected)}]"
             )
 
-    # ── 티어드 보너스 캡 ─────────────────────────────────────────
-    bonus_raw   = sum(v for _,v in bonuses)
-    bonus_cap   = _get_tiered_bonus_cap(base_score)
-    bonus_total = min(bonus_cap, bonus_raw)
-    if bonus_raw > bonus_cap:
-        logger.info(f"[보너스캡] base:{base_score:.0f}pt → 캡:{bonus_cap}pt ({bonus_raw}→{bonus_total}pt)")
+    # ── [v3.4] 역추세 보너스 캡 / 티어드 캡 ─────────────────────
+    # BOS역방향 AND EMA3역방향 동시 → 역추세 캡(14pt) 강제
+    # BOS역방향만 있으면 조기 전환 가능성 → 기존 티어드 캡 유지
+    bonus_raw = sum(v for _, v in bonuses)
+
+    apply_counter_cap = (
+        bos_conflict_penalty < 1.0 and
+        ema_all_reverse and
+        not bb_reversal_exempt
+    )
+    if apply_counter_cap:
+        bonus_cap   = config.COUNTER_TREND_BONUS_CAP
+        bonus_total = min(bonus_cap, bonus_raw)
+        if bonus_raw > bonus_cap:
+            logger.info(
+                f"[역추세보너스캡/{d.upper()}] "
+                f"BOS역방향+EMA3역방향 → 보너스 {bonus_raw}→{bonus_total}pt "
+                f"(캡:{bonus_cap}pt)"
+            )
+    else:
+        bonus_cap   = _get_tiered_bonus_cap(base_score)
+        bonus_total = min(bonus_cap, bonus_raw)
+        if bonus_raw > bonus_cap:
+            logger.info(
+                f"[보너스캡] base:{base_score:.0f}pt → 캡:{bonus_cap}pt "
+                f"({bonus_raw}→{bonus_total}pt)"
+            )
 
     # ── 캔들 모멘텀 역방향 패널티 ───────────────────────────────
     candle_momentum_mult = 1.0
@@ -461,10 +486,19 @@ def calculate_entry_score(analysis: dict, direction: str,
         bos_conflict_penalty = config.BOS_CONFLICT_PENALTY
         logger.info(f"[BOS/{d.upper()}] ⚠️ 상승 BOS 확증 → 역추세 숏 ×{bos_conflict_penalty}")
 
+    # ── [v3.4] EXPLOSIVE + BOS 역방향 강화 페널티 ───────────────
+    # BOS충돌(×0.82) × 추가(×0.85) = 합산 ×0.697
+    # 완전 차단 대신 강한 페널티로 임계값 통과 허들을 높임
+    explosive_bos_penalty = 1.0
+    if regime_name == "EXPLOSIVE" and bos_conflict_penalty < 1.0:
+        explosive_bos_penalty = config.EXPLOSIVE_BOS_CONFLICT_PENALTY
+        logger.info(
+            f"[EXPLOSIVE+BOS역방향/{d.upper()}] "
+            f"강화 페널티 ×{explosive_bos_penalty:.2f} 추가 "
+            f"(합산 ×{bos_conflict_penalty * explosive_bos_penalty:.3f})"
+        )
+
     # ── 거래량 페널티 [v3.3 patch] ───────────────────────────────
-    # volume 가중치 5~9%로 낮아 0pt여도 raw_score 억제 ~2.5~4.5pt에 불과.
-    # 보너스 하나(+4pt~)로 쉽게 상쇄 → 저거래량(주말 등) 신호 과다 발생.
-    # → vol score 기준 명시적 덧셈 페널티로 추가 억제.
     vol_score = vol.get("score", 50.0)
     if vol_score < config.VOLUME_PENALTY_LOW_THRESHOLD:
         volume_penalty = config.VOLUME_PENALTY_LOW
@@ -484,7 +518,14 @@ def calculate_entry_score(analysis: dict, direction: str,
         volume_penalty = 0
 
     # ── 최종 점수 ────────────────────────────────────────────────
-    soft_penalty  = mtf_penalty * exhaustion_mult * candle_momentum_mult * choch_penalty * bos_conflict_penalty
+    soft_penalty = (
+        mtf_penalty *
+        exhaustion_mult *
+        candle_momentum_mult *
+        choch_penalty *
+        bos_conflict_penalty *
+        explosive_bos_penalty   # [v3.4]
+    )
     micro_penalty = micro_result.get("total_penalty", 0) if micro_result else 0
 
     final_score = round(
@@ -493,9 +534,42 @@ def calculate_entry_score(analysis: dict, direction: str,
         )), 2
     )
 
-    # regime_threshold 단독 기준 (SIGNAL_MIN_SCORE 제거)
+    # ── [v3.4] ADX 연동 역추세 임계값 조정 ──────────────────────
+    # EMA 3역방향이면 ADX 강도에 비례해 임계값 상향 (최대 +15pt)
+    # 위치: final_score 산출 후, signal 판정 직전
     regime_threshold = regime.get("threshold", config.REGIME_THRESHOLDS.get("TRENDING", 63))
+
+    if ema_all_reverse and not bb_reversal_exempt:
+        adx_val_ct = adx_15m.get("adx", 0.0)
+        if   adx_val_ct >= config.ADX_COUNTER_TREND_THRESHOLD_STRONG:
+            ct_boost = config.ADX_COUNTER_TREND_BOOST_STRONG
+        elif adx_val_ct >= config.ADX_COUNTER_TREND_THRESHOLD_MID:
+            ct_boost = config.ADX_COUNTER_TREND_BOOST_MID
+        elif adx_val_ct >= config.ADX_COUNTER_TREND_THRESHOLD_WEAK:
+            ct_boost = config.ADX_COUNTER_TREND_BOOST_WEAK
+        else:
+            ct_boost = 0
+
+        if ct_boost > 0:
+            regime_threshold = min(85, regime_threshold + ct_boost)
+            logger.info(
+                f"[ADX역추세/{d.upper()}] "
+                f"ADX:{adx_val_ct:.0f} EMA3역방향 "
+                f"→ 임계값 +{ct_boost}pt = {regime_threshold}pt"
+            )
+
     signal = (final_score >= regime_threshold)
+
+    # ── [v3.4] FVG 양방향 모호 + 저거래량 사후 차단 ─────────────
+    # 조건: FVG 강세+약세 동시 AND vol_score < 30pt
+    # 옵션 A: 거래량 충분(30pt+)이면 양방향 FVG도 유지
+    if signal and both_fvg and vol_score < config.FVG_AMBIGUOUS_VOL_THRESHOLD:
+        signal = False
+        logger.info(
+            f"[FVG모호+저거래량/{d.upper()}] "
+            f"FVG 양방향 + vol:{vol_score:.1f}pt < {config.FVG_AMBIGUOUS_VOL_THRESHOLD}pt "
+            f"→ 신호 차단"
+        )
 
     # ── 로그 ─────────────────────────────────────────────────────
     micro_note   = f" +micro{micro_penalty:+d}pt" if micro_penalty != 0 else ""
@@ -506,14 +580,15 @@ def calculate_entry_score(analysis: dict, direction: str,
         logger.info(
             f"[Score/{d.upper()}] [{regime_name}]"
             f" raw:{raw_score:.1f} ×EMA{ema_mult:.2f}"
-            + (f" ×게이트{gate_penalty:.2f}" if gate_penalty < 1.0 else "")
+            + (f" ×게이트{gate_penalty:.2f}"              if gate_penalty < 1.0              else "")
             + f" → base:{base_score:.1f}pt"
             f" → (base:{base_score:.1f}+보너스{bonus_total}[cap:{bonus_cap}])"
-            + (f" ×MTF{mtf_penalty:.2f}"              if mtf_penalty < 1.0           else "")
-            + (f" ×소진{exhaustion_mult:.2f}"          if exhaustion_mult < 1.0       else "")
-            + (f" ×캔들{candle_momentum_mult:.2f}"     if candle_momentum_mult < 1.0  else "")
-            + (f" ×CHoCH{choch_penalty:.2f}"           if choch_penalty < 1.0         else "")
-            + (f" ×BOS충돌{bos_conflict_penalty:.2f}"  if bos_conflict_penalty < 1.0  else "")
+            + (f" ×MTF{mtf_penalty:.2f}"                  if mtf_penalty < 1.0               else "")
+            + (f" ×소진{exhaustion_mult:.2f}"              if exhaustion_mult < 1.0           else "")
+            + (f" ×캔들{candle_momentum_mult:.2f}"         if candle_momentum_mult < 1.0      else "")
+            + (f" ×CHoCH{choch_penalty:.2f}"               if choch_penalty < 1.0             else "")
+            + (f" ×BOS충돌{bos_conflict_penalty:.2f}"      if bos_conflict_penalty < 1.0      else "")
+            + (f" ×EXP+BOS{explosive_bos_penalty:.2f}"     if explosive_bos_penalty < 1.0     else "")
             + micro_note + vol_note
             + f" = {final_score:.1f}pt (임계:{regime_threshold}pt)"
             + (" 🚨 신호" if signal else "")
@@ -532,7 +607,8 @@ def calculate_entry_score(analysis: dict, direction: str,
     breakdown = _build_breakdown(
         d, scores, weights, raw_score, ema_mult, gate_penalty,
         mtf_penalty, exhaustion_mult, choch_penalty, bos_conflict_penalty,
-        bonuses, bonus_cap, final_score, gate, regime, micro_penalty, volume_penalty
+        explosive_bos_penalty, bonuses, bonus_cap, final_score,
+        gate, regime, micro_penalty, volume_penalty
     )
     return {
         "direction": d, "final_score": final_score, "raw_score": round(raw_score, 2),
@@ -544,12 +620,13 @@ def calculate_entry_score(analysis: dict, direction: str,
         "mtf_penalty": mtf_penalty, "exhaustion_mult": exhaustion_mult,
         "candle_momentum_mult": candle_momentum_mult, "choch_penalty": choch_penalty,
         "bos_conflict_penalty": bos_conflict_penalty,
+        "explosive_bos_penalty": explosive_bos_penalty,
         "volume_penalty": volume_penalty,
     }
 
 
 def _build_breakdown(d, scores, weights, raw, ema_m, pen,
-                     mtf_m, exh_m, choch_m, bos_m,
+                     mtf_m, exh_m, choch_m, bos_m, exp_bos_m,
                      bonuses, bonus_cap, final, gate, regime,
                      micro_penalty=0, volume_penalty=0) -> str:
     label = "🟢 롱" if d == "long" else "🔴 숏"
@@ -560,20 +637,19 @@ def _build_breakdown(d, scores, weights, raw, ema_m, pen,
         lines.append(f"  {_score_label(key):<14} {bar} {s:>5.1f}pt × {weight:.0%} = {contrib:>4.1f}pt")
     lines.append(f"  {'─'*46}")
     lines.append(f"  가중합                           {raw:>5.1f}pt")
-    if ema_m   < 1.0: lines.append(f"  EMA 역방향 배율         × {ema_m:.2f}")
-    if pen     < 1.0: lines.append(f"  복합 페널티             × {pen:.2f}")
-    if mtf_m   < 1.0: lines.append(f"  MTF RSI 패널티          × {mtf_m:.2f}")
-    if exh_m   < 1.0: lines.append(f"  EXPLOSIVE 소진 패널티   × {exh_m:.2f}")
-    if choch_m < 1.0: lines.append(f"  CHoCH 역방향 패널티     × {choch_m:.2f}")
-    if bos_m   < 1.0: lines.append(f"  BOS 역방향 패널티       × {bos_m:.2f}")
+    if ema_m       < 1.0: lines.append(f"  EMA 역방향 배율         × {ema_m:.2f}")
+    if pen         < 1.0: lines.append(f"  복합 페널티             × {pen:.2f}")
+    if mtf_m       < 1.0: lines.append(f"  MTF RSI 패널티          × {mtf_m:.2f}")
+    if exh_m       < 1.0: lines.append(f"  EXPLOSIVE 소진 패널티   × {exh_m:.2f}")
+    if choch_m     < 1.0: lines.append(f"  CHoCH 역방향 패널티     × {choch_m:.2f}")
+    if bos_m       < 1.0: lines.append(f"  BOS 역방향 패널티       × {bos_m:.2f}")
+    if exp_bos_m   < 1.0: lines.append(f"  EXPLOSIVE+BOS 강화패널티× {exp_bos_m:.2f}")
     if bonuses:
         lines.append(f"  보너스 (상한:{bonus_cap}pt):")
         for name, val in bonuses:
             lines.append(f"    + {name}: +{val}pt")
-    if micro_penalty != 0:
-        lines.append(f"  마이크로구조 패널티       {micro_penalty:+d}pt")
-    if volume_penalty != 0:
-        lines.append(f"  거래량 페널티             {volume_penalty:+d}pt")
+    if micro_penalty  != 0: lines.append(f"  마이크로구조 패널티       {micro_penalty:+d}pt")
+    if volume_penalty != 0: lines.append(f"  거래량 페널티             {volume_penalty:+d}pt")
     lines.append(f"  {'─'*46}")
     lines.append(f"  최종 (임계:{regime.get('threshold',63)}pt)  {final:>5.1f}pt")
     return "\n".join(lines)
