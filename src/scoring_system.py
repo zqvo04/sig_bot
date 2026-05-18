@@ -3,7 +3,7 @@ scoring_system.py — 점수 산출 (v3.4)
 ────────────────────────────────────────────────────────────────────
 [v3.4 추가]
 
-⑦ EXPLOSIVE + BOS 역방향 강화 페널티
+⑦ EXPLOSIVE + BOS 역방향 강화 패널티
    조건: regime == EXPLOSIVE AND bos_conflict_penalty < 1.0
    적용: soft_penalty 체인에 ×EXPLOSIVE_BOS_CONFLICT_PENALTY(0.85) 추가
    합산: ×0.82(BOS충돌) × ×0.85(추가) = ×0.697
@@ -11,19 +11,19 @@ scoring_system.py — 점수 산출 (v3.4)
 ⑧ ADX 연동 역추세 임계값 조정
    조건: ema_all_reverse AND NOT bb_reversal_exempt
    적용: ADX 강도에 따라 regime_threshold 동적 상향 (최대 +15pt)
-     ADX >= 45 → +15pt / ADX >= 35 → +10pt / ADX >= 25 → +5pt
-   위치: final_score 산출 후, signal 판정 직전
 
 ⑨ 역추세 보너스 캡 분리
    조건: bos_conflict_penalty < 1.0 AND ema_all_reverse AND NOT bb_reversal_exempt
    적용: 기존 티어드 캡 대신 COUNTER_TREND_BONUS_CAP(14pt) 강제 적용
-   설계: BOS역방향만 → 티어드 캡 유지 (조기 전환 가능성 보존)
-         BOS+EMA 둘 다 역방향 → 14pt 강제 (진정 역추세 보너스 제한)
 
 ⑩ FVG 양방향 모호 + 저거래량 신호 차단
    조건: in_bullish_fvg AND in_bearish_fvg AND vol_score < 30pt
-   적용: signal = False (이미 통과한 신호를 사후 차단)
-   옵션 A: 거래량이 충분(30pt+)하면 FVG 양방향이어도 유지
+
+[v3.4 버그 수정]
+  UnboundLocalError: bos_conflict_penalty / choch_penalty를
+  보너스 섹션 이전에 사전 계산하도록 순서 재배치.
+  apply_counter_cap 체크가 bos_conflict_penalty를 참조하므로
+  반드시 보너스 캡 계산 전에 정의되어야 함.
 
 [v3.3] base_score 유령계산 제거, SIGNAL_MIN_SCORE 제거, 거래량 패널티, lookback 개선
 [v3.2] BOS_CONFLICT_PENALTY ×0.82
@@ -203,6 +203,29 @@ def calculate_entry_score(analysis: dict, direction: str,
         }
 
     # ══════════════════════════════════════════════════════════════
+    # [v3.4 순서 수정] CHoCH / BOS 패널티 사전 계산
+    # apply_counter_cap이 bos_conflict_penalty를 참조하므로
+    # 보너스 섹션 진입 전에 반드시 정의되어야 함.
+    # ══════════════════════════════════════════════════════════════
+    bos_choch_data = analysis.get("bos_choch", {})
+
+    choch_penalty = 1.0
+    if d == "long"  and bos_choch_data.get("choch_bearish"):
+        choch_penalty = config.CHOCH_AGAINST_PENALTY
+        logger.info(f"[CHoCH/{d.upper()}] ⚠️ 하락전환 경고 중 롱 → ×{choch_penalty}")
+    elif d == "short" and bos_choch_data.get("choch_bullish"):
+        choch_penalty = config.CHOCH_AGAINST_PENALTY
+        logger.info(f"[CHoCH/{d.upper()}] ⚠️ 상승전환 경고 중 숏 → ×{choch_penalty}")
+
+    bos_conflict_penalty = 1.0
+    if d == "long" and bos_choch_data.get("bos_bearish"):
+        bos_conflict_penalty = config.BOS_CONFLICT_PENALTY
+        logger.info(f"[BOS/{d.upper()}] ⚠️ 하락 BOS 확증 → 역추세 롱 ×{bos_conflict_penalty}")
+    elif d == "short" and bos_choch_data.get("bos_bullish"):
+        bos_conflict_penalty = config.BOS_CONFLICT_PENALTY
+        logger.info(f"[BOS/{d.upper()}] ⚠️ 상승 BOS 확증 → 역추세 숏 ×{bos_conflict_penalty}")
+
+    # ══════════════════════════════════════════════════════════════
     # 보너스 계산
     # ══════════════════════════════════════════════════════════════
     bonuses = []
@@ -317,12 +340,11 @@ def calculate_entry_score(analysis: dict, direction: str,
         bonuses.append(("FVG약세진입", fvg_val))
         logger.info(f"[FVG] ★ 숏 FVG +{fvg_val}pt")
 
-    # ⑩ BOS 확증
-    bos_choch = analysis.get("bos_choch", {})
-    if d == "long"  and bos_choch.get("bos_bullish"):
+    # ⑩ BOS 확증 (방향 일치 시만 보너스)
+    if d == "long"  and bos_choch_data.get("bos_bullish"):
         bonuses.append(("BOS상승확증", config.BONUS_BOS_CONFIRM))
         logger.info(f"[BOS] ★ 상승 BOS +{config.BONUS_BOS_CONFIRM}pt")
-    elif d == "short" and bos_choch.get("bos_bearish"):
+    elif d == "short" and bos_choch_data.get("bos_bearish"):
         bonuses.append(("BOS하락확증", config.BONUS_BOS_CONFIRM))
         logger.info(f"[BOS] ★ 하락 BOS +{config.BONUS_BOS_CONFIRM}pt")
 
@@ -425,8 +447,7 @@ def calculate_entry_score(analysis: dict, direction: str,
             )
 
     # ── [v3.4] 역추세 보너스 캡 / 티어드 캡 ─────────────────────
-    # BOS역방향 AND EMA3역방향 동시 → 역추세 캡(14pt) 강제
-    # BOS역방향만 있으면 조기 전환 가능성 → 기존 티어드 캡 유지
+    # bos_conflict_penalty는 위 사전 계산 섹션에서 이미 정의됨
     bonus_raw = sum(v for _, v in bonuses)
 
     apply_counter_cap = (
@@ -467,34 +488,13 @@ def calculate_entry_score(analysis: dict, direction: str,
             else:                            candle_momentum_mult = config.CANDLE_MOMENTUM_PENALTY_RANGING
             logger.info(f"[캔들모멘텀] 연속음봉 중 롱 ×{candle_momentum_mult:.2f}")
 
-    # ── CHoCH 역방향 패널티 ──────────────────────────────────────
-    choch_penalty    = 1.0
-    bos_choch_data   = analysis.get("bos_choch", {})
-    if d == "long"  and bos_choch_data.get("choch_bearish"):
-        choch_penalty = config.CHOCH_AGAINST_PENALTY
-        logger.info(f"[CHoCH/{d.upper()}] ⚠️ 하락전환 경고 중 롱 → ×{choch_penalty}")
-    elif d == "short" and bos_choch_data.get("choch_bullish"):
-        choch_penalty = config.CHOCH_AGAINST_PENALTY
-        logger.info(f"[CHoCH/{d.upper()}] ⚠️ 상승전환 경고 중 숏 → ×{choch_penalty}")
-
-    # ── BOS 역방향 패널티 ────────────────────────────────────────
-    bos_conflict_penalty = 1.0
-    if d == "long" and bos_choch_data.get("bos_bearish"):
-        bos_conflict_penalty = config.BOS_CONFLICT_PENALTY
-        logger.info(f"[BOS/{d.upper()}] ⚠️ 하락 BOS 확증 → 역추세 롱 ×{bos_conflict_penalty}")
-    elif d == "short" and bos_choch_data.get("bos_bullish"):
-        bos_conflict_penalty = config.BOS_CONFLICT_PENALTY
-        logger.info(f"[BOS/{d.upper()}] ⚠️ 상승 BOS 확증 → 역추세 숏 ×{bos_conflict_penalty}")
-
-    # ── [v3.4] EXPLOSIVE + BOS 역방향 강화 페널티 ───────────────
-    # BOS충돌(×0.82) × 추가(×0.85) = 합산 ×0.697
-    # 완전 차단 대신 강한 페널티로 임계값 통과 허들을 높임
+    # ── [v3.4] EXPLOSIVE + BOS 역방향 강화 패널티 ───────────────
     explosive_bos_penalty = 1.0
     if regime_name == "EXPLOSIVE" and bos_conflict_penalty < 1.0:
         explosive_bos_penalty = config.EXPLOSIVE_BOS_CONFLICT_PENALTY
         logger.info(
             f"[EXPLOSIVE+BOS역방향/{d.upper()}] "
-            f"강화 페널티 ×{explosive_bos_penalty:.2f} 추가 "
+            f"강화 패널티 ×{explosive_bos_penalty:.2f} 추가 "
             f"(합산 ×{bos_conflict_penalty * explosive_bos_penalty:.3f})"
         )
 
@@ -524,7 +524,7 @@ def calculate_entry_score(analysis: dict, direction: str,
         candle_momentum_mult *
         choch_penalty *
         bos_conflict_penalty *
-        explosive_bos_penalty   # [v3.4]
+        explosive_bos_penalty
     )
     micro_penalty = micro_result.get("total_penalty", 0) if micro_result else 0
 
@@ -535,8 +535,6 @@ def calculate_entry_score(analysis: dict, direction: str,
     )
 
     # ── [v3.4] ADX 연동 역추세 임계값 조정 ──────────────────────
-    # EMA 3역방향이면 ADX 강도에 비례해 임계값 상향 (최대 +15pt)
-    # 위치: final_score 산출 후, signal 판정 직전
     regime_threshold = regime.get("threshold", config.REGIME_THRESHOLDS.get("TRENDING", 63))
 
     if ema_all_reverse and not bb_reversal_exempt:
@@ -561,8 +559,6 @@ def calculate_entry_score(analysis: dict, direction: str,
     signal = (final_score >= regime_threshold)
 
     # ── [v3.4] FVG 양방향 모호 + 저거래량 사후 차단 ─────────────
-    # 조건: FVG 강세+약세 동시 AND vol_score < 30pt
-    # 옵션 A: 거래량 충분(30pt+)이면 양방향 FVG도 유지
     if signal and both_fvg and vol_score < config.FVG_AMBIGUOUS_VOL_THRESHOLD:
         signal = False
         logger.info(
