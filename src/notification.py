@@ -1,29 +1,28 @@
 """
-notification.py — 텔레그램 알림 (v3.3)
+notification.py — 텔레그램 알림 (v3.4)
 ──────────────────────────────────────────────────────────────────────────────
-[v3.3 변경]
+[v3.4 변경]
 
-★ BOS 역방향 패널티 표시 추가
-  scoring_system v3.2에서 추가된 bos_conflict_penalty(×0.82)가
-  알림에 반영되지 않던 문제 수정.
-  지표별 점수 섹션에 "⚠️ BOS 역방향 패널티: ×0.82" 표시.
-  SMC 섹션에 "⛔ 역방향 BOS 패널티 ×0.82 적용됨" 메시지 추가.
+★ EXPLOSIVE + BOS 역방향 강화 패널티 표시 추가
+  scoring_system v3.4에서 추가된 explosive_bos_penalty(×0.85)를
+  "지표별 점수" 섹션에 표시.
+  "판단 근거"에도 EXPLOSIVE+BOS 강화 패널티 적용 사실 추가.
 
-★ adx_multiplier 데드코드 제거
-  scoring_system에서 adx_multiplier는 항상 1.0으로 반환됨.
-  notification에서 "ADX횡보 배율: ×..." 줄은 절대 표시 불가 → 제거.
+★ ADX 연동 역추세 임계값 부스트 표시 추가
+  EMA 3역방향 + ADX 강도에 따라 임계값이 상향된 경우
+  "지표별 점수" 섹션에 표시.
+  base_threshold(regime.threshold) vs 실제 regime_thr 비교로 부스트 감지.
 
-★ OI 관련 섹션 제거
-  - _micro_label: "OIVelocity" 항목 제거
-  - OI 레짐 태그 표시 블록 제거 (ACCUMULATION/SHORT_BUILDUP 등)
-  - 방안 번호 재정리 반영 (6개 방안 / 5개 데이터)
+★ 역추세 보너스 캡(14pt) 구분 표시
+  BOS역방향+EMA3역방향 동시 → 역추세 캡(14pt) 적용 시
+  기존 티어드 캡과 구별되는 표시로 변경.
 
-★ label_map: "oi_change" 항목 유지 불필요 → 제거됨
-  (analysis 반환 dict에서도 oi_change는 available:False 고정)
+★ FVG 양방향 + 저거래량 차단 (⑩)
+  차단된 신호는 notify_signal 자체가 호출되지 않으므로 알림 없음.
+  FVG 양방향 활성은 기존 SMC 섹션의 "방향 모호 구간" 표시로 이미 안내됨.
 
-[이전]
-v3.1: OI 변화율 섹션 제거
-v3.0: 전체 리팩토링
+[v3.3]
+  BOS 역방향 패널티 표시, adx_multiplier 제거, OI 섹션 제거
 ──────────────────────────────────────────────────────────────────────────────
 """
 import logging, time
@@ -112,11 +111,10 @@ def _calc_sl_tp(current_price, direction, atr_val, rr=2.0, atr_mult=1.5,
 
 
 def _micro_label(name: str) -> str:
-    """마이크로구조 방안 이름 → 한국어 라벨 (v3.3: OI 제거)"""
+    """마이크로구조 방안 이름 → 한국어 라벨"""
     return {
         "LiqCascade":   "청산캐스케이드",
         "OrderBook":    "오더북벽",
-        # OIVelocity 제거됨 (v3.3)
         "OBImbalance":  "호가잔량불균형",
         "CandleMom":    "캔들모멘텀",
         "MarkFunding":  "마크/펀딩",
@@ -170,13 +168,15 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     gate       = side_result.get("gate_info",         {})
     regime_thr = side_result.get("regime_threshold",  63)
 
-    mtf_penalty        = side_result.get("mtf_penalty",         1.0)
-    exhaustion_mult    = side_result.get("exhaustion_mult",      1.0)
-    candle_momentum_m  = side_result.get("candle_momentum_mult", 1.0)
-    choch_penalty      = side_result.get("choch_penalty",        1.0)
-    bos_conflict_penalty = side_result.get("bos_conflict_penalty", 1.0)  # [v3.3]
-    bonus_cap          = side_result.get("bonus_cap",            36)
-    bonus_total        = side_result.get("bonus_total",          0)
+    mtf_penalty          = side_result.get("mtf_penalty",            1.0)
+    exhaustion_mult      = side_result.get("exhaustion_mult",         1.0)
+    candle_momentum_m    = side_result.get("candle_momentum_mult",    1.0)
+    choch_penalty        = side_result.get("choch_penalty",           1.0)
+    bos_conflict_penalty = side_result.get("bos_conflict_penalty",    1.0)
+    explosive_bos_penalty = side_result.get("explosive_bos_penalty",  1.0)  # [v3.4]
+    bonus_cap            = side_result.get("bonus_cap",               36)
+    bonus_total          = side_result.get("bonus_total",             0)
+    volume_penalty       = side_result.get("volume_penalty",          0)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = []
@@ -184,7 +184,7 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     same_count    = ema.get("same_count",    0)
     reverse_count = ema.get("reverse_count", 0)
 
-    # 등급
+    # ── 등급 ──────────────────────────────────────────────────
     if score >= 85:
         grade_icon, grade_label, grade_desc = "🔥🔥", "STRONG", "매우 강한 신호 — 즉시 대응 권장"
     elif score >= 72:
@@ -197,13 +197,13 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         grade_label = grade_label + "⚠"
         grade_desc  = grade_desc + " | 마이크로구조 경고 확인"
 
-    # EMA 정합
+    # ── EMA 정합 ──────────────────────────────────────────────
     if   same_count == 3: trend_align, trend_detail = "✅ 순방향 3/3", "3개 TF EMA 모두 신호 방향 일치"
     elif same_count == 2: trend_align, trend_detail = "✅ 순방향 2/3", "2개 TF EMA 신호 방향 일치"
     elif same_count == 1: trend_align, trend_detail = "⚠️ 부분 역방향 2/3", "상위 TF와 방향 불일치 — 주의"
     else:                 trend_align, trend_detail = "⚠️ 역방향 3/3", "모든 TF EMA가 반대 방향 — 역추세 진입"
 
-    # 눌림목
+    # ── 눌림목 ────────────────────────────────────────────────
     pb_strong = rsi.get("pullback_long_strong"  if direction=="long" else "pullback_short_strong", False)
     pb_weak   = rsi.get("pullback_long_weak"    if direction=="long" else "pullback_short_weak",   False)
     pb_micro  = rsi.get("pullback_long_micro"   if direction=="long" else "pullback_short_micro",  False)
@@ -217,7 +217,7 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         elif pb_weak:  pullback_str = "  ★ 눌림목 숏(약) — 1h RSI 중립하(<48) + 15m 과열(>56)"
         elif pb_micro: pullback_str = "  ★ 눌림목 숏(미) — 1h RSI 최소조건 + 15m 소폭 과열(>55)"
 
-    # SMC 태그
+    # ── SMC 태그 ──────────────────────────────────────────────
     smc_tags = []
     if fvg.get("in_bullish_fvg" if direction=="long" else "in_bearish_fvg"):
         smc_tags.append("FVG")
@@ -265,7 +265,7 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         lines.append(f"  📊 ATR: ${atr_val:,.2f}  ×{atr.get('ratio',1.0):.1f}배")
         lines.append("")
 
-    # ── 🔬 마이크로구조 필터 ──────────────────────────────────
+    # ── 마이크로구조 필터 ─────────────────────────────────────
     if micro_details:
         cap_note = (f" → cap {micro_total:+d}pt" if micro_raw != micro_total else "")
         lines.append(f"🔬 <b>마이크로구조 필터</b>  합계:<b>{micro_raw:+d}pt</b>{cap_note}")
@@ -275,7 +275,6 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
             r_short = reason.replace("⚠️","").replace("✅","").strip()[:60]
             lines.append(f"  {icon} {label}: <b>{p:+d}pt</b>  <i>{r_short}</i>")
 
-        # OB 잔량 불균형 요약
         obi = next((d for d in micro_details if d[0] == "OBImbalance"), None)
         if obi and obi[1] != 0:
             obi_icon = "🟢" if obi[1] > 0 else "🔴"
@@ -283,7 +282,6 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
                 f"  └ 호가잔량: {obi_icon} "
                 f"{obi[2].replace('✅','').replace('⚠️','').strip()[:45]}"
             )
-
         lines.append("")
 
     # ── 시장 국면 ─────────────────────────────────────────────
@@ -379,10 +377,9 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         else:
             lines.append("  FVG      : — FVG 외부")
 
-        # BOS / CHoCH [v3.3: BOS 충돌 패널티 표시 추가]
+        # BOS / CHoCH
         if bos_choch.get("bos_bullish"):
             if direction == "short":
-                # 방향 충돌: 상승 BOS인데 숏 시그널
                 lines.append("  BOS/CHoCH: ✅ 상승 BOS 확증 — 스윙고점 돌파, 상승 추세 지속")
                 lines.append(
                     f"    └ ⛔ 숏 진입과 역방향 — BOS 충돌 패널티 ×{bos_conflict_penalty:.2f} 적용됨"
@@ -392,7 +389,6 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
 
         elif bos_choch.get("bos_bearish"):
             if direction == "long":
-                # 방향 충돌: 하락 BOS인데 롱 시그널
                 lines.append("  BOS/CHoCH: ✅ 하락 BOS 확증 — 스윙저점 이탈, 하락 추세 지속")
                 lines.append(
                     f"    └ ⛔ 롱 진입과 역방향 — BOS 충돌 패널티 ×{bos_conflict_penalty:.2f} 적용됨"
@@ -488,7 +484,6 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
             f"롱{ls.get('long_pct',0.5)*100:.1f}% / "
             f"숏{ls.get('short_pct',0.5)*100:.1f}%  [{ls_bias_v}]"
         )
-
         ls_div = next((d for d in micro_details if d[0] == "LSDivergence"), None)
         if ls_div and ls_div[1] != 0:
             ls_icon2 = "🔴" if ls_div[1] < 0 else "🟢"
@@ -557,32 +552,57 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         contrib = s * weight
         lines.append(f"  {label_map.get(key, key)}: {_bar(s, 8)}  <i>({contrib:.1f}pt)</i>")
 
-    # 패널티 표시 [v3.3: adx_multiplier 제거, bos_conflict_penalty 추가]
+    # 패널티 표시
     ema_m_d  = side_result.get("ema_multiplier", 1.0)
     gate_p   = gate.get("funding_penalty",       1.0)
     rsi_1h_v = rsi.get("value_1h") or 0
     rsi_4h_v = rsi.get("value_4h") or 0
 
-    if ema_m_d            < 1.0: lines.append(f"  EMA역방향 배율           : ×{ema_m_d:.2f}")
-    # adx_multiplier 항목 제거됨 (v3.3) — scoring_system에서 항상 1.0 반환
-    if gate_p             < 1.0: lines.append(f"  복합 페널티              : ×{gate_p:.2f}")
-    if mtf_penalty        < 1.0: lines.append(
-        f"  ⚠️ MTF RSI 과열 패널티  : ×{mtf_penalty:.2f}  (1h:{rsi_1h_v:.0f} 4h:{rsi_4h_v:.0f})"
-    )
-    if exhaustion_mult    < 1.0: lines.append(
-        f"  ⚠️ EXPLOSIVE 소진 패널티: ×{exhaustion_mult:.2f}  (1h RSI:{rsi_1h_v:.0f})"
-    )
-    if candle_momentum_m  < 1.0: lines.append(
-        f"  ⚠️ 캔들 모멘텀 역방향   : ×{candle_momentum_m:.2f}"
-    )
-    if choch_penalty      < 1.0: lines.append(
-        f"  ⚠️ CHoCH 역방향 패널티  : ×{choch_penalty:.2f}  (추세 전환 경고 중)"
-    )
-    # [v3.3] BOS 역방향 패널티 표시 추가
-    if bos_conflict_penalty < 1.0: lines.append(
-        f"  ⚠️ BOS 역방향 패널티    : ×{bos_conflict_penalty:.2f}  "
-        f"({'하락' if direction=='long' else '상승'} BOS 확증 중 역추세 진입)"
-    )
+    if ema_m_d              < 1.0:
+        lines.append(f"  EMA역방향 배율           : ×{ema_m_d:.2f}")
+    if gate_p               < 1.0:
+        lines.append(f"  복합 페널티              : ×{gate_p:.2f}")
+    if mtf_penalty          < 1.0:
+        lines.append(
+            f"  ⚠️ MTF RSI 과열 패널티  : ×{mtf_penalty:.2f}  (1h:{rsi_1h_v:.0f} 4h:{rsi_4h_v:.0f})"
+        )
+    if exhaustion_mult      < 1.0:
+        lines.append(
+            f"  ⚠️ EXPLOSIVE 소진 패널티: ×{exhaustion_mult:.2f}  (1h RSI:{rsi_1h_v:.0f})"
+        )
+    if candle_momentum_m    < 1.0:
+        lines.append(f"  ⚠️ 캔들 모멘텀 역방향   : ×{candle_momentum_m:.2f}")
+    if choch_penalty        < 1.0:
+        lines.append(
+            f"  ⚠️ CHoCH 역방향 패널티  : ×{choch_penalty:.2f}  (추세 전환 경고 중)"
+        )
+    if bos_conflict_penalty < 1.0:
+        lines.append(
+            f"  ⚠️ BOS 역방향 패널티    : ×{bos_conflict_penalty:.2f}  "
+            f"({'하락' if direction=='long' else '상승'} BOS 확증 중 역추세 진입)"
+        )
+
+    # [v3.4] EXPLOSIVE + BOS 강화 패널티 표시
+    if explosive_bos_penalty < 1.0:
+        combined = round(bos_conflict_penalty * explosive_bos_penalty, 3)
+        lines.append(
+            f"  ⚠️ EXPLOSIVE+BOS 강화패널티: ×{explosive_bos_penalty:.2f}  "
+            f"(합산 ×{combined:.3f})"
+        )
+
+    # [v3.4] ADX 역추세 임계값 부스트 표시
+    # base_threshold와 실제 regime_thr 비교로 부스트 감지
+    base_threshold = regime_info.get("threshold", 63)
+    if regime_thr > base_threshold and reverse_count == 3:
+        ct_boost    = regime_thr - base_threshold
+        adx_val_cur = adx.get("adx", 0.0)
+        lines.append(
+            f"  ⚠️ ADX 역추세 임계값 상향: +{ct_boost}pt  "
+            f"(ADX:{adx_val_cur:.0f} → 임계 {regime_thr}pt)"
+        )
+
+    if volume_penalty != 0:
+        lines.append(f"  거래량 페널티            : {volume_penalty:+d}pt")
     if micro_total != 0:
         cap_sfx = f" (raw:{micro_raw:+d}pt → cap)" if micro_raw != micro_total else ""
         lines.append(f"  🔬 마이크로구조 합계     : {micro_total:+d}pt{cap_sfx}")
@@ -625,16 +645,23 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     elif direction=="short" and fibonacci.get("in_golden_pocket_short"):
         reasons.append(f"피보 황금포켓 {fibonacci.get('short_retracement','?')}% — 가장 강력한 재진입 구간")
 
-    # BOS 이유 표시 (방향 일치 시)
+    # BOS 방향 일치
     if direction=="long"  and bos_choch.get("bos_bullish"):
         reasons.append("BOS 상승 확증 — 스윙고점 돌파로 상승 구조 지속")
     elif direction=="short" and bos_choch.get("bos_bearish"):
         reasons.append("BOS 하락 확증 — 스윙저점 이탈로 하락 구조 지속")
-    # BOS 방향 충돌 시 (역추세)
+    # BOS 방향 충돌 (역추세)
     elif direction=="long"  and bos_choch.get("bos_bearish"):
         reasons.append(f"⚠️ 하락 BOS 중 역추세 롱 — BOS 패널티 ×{bos_conflict_penalty:.2f}")
     elif direction=="short" and bos_choch.get("bos_bullish"):
         reasons.append(f"⚠️ 상승 BOS 중 역추세 숏 — BOS 패널티 ×{bos_conflict_penalty:.2f}")
+
+    # [v3.4] EXPLOSIVE + BOS 역방향 강화 패널티 이유 표시
+    if explosive_bos_penalty < 1.0:
+        combined = round(bos_conflict_penalty * explosive_bos_penalty, 3)
+        reasons.append(
+            f"⚠️ EXPLOSIVE 국면 역추세 — 강화 패널티 적용 (합산 ×{combined:.3f})"
+        )
 
     taker_bias = taker.get("bias", "neutral")
     vol_strong = analysis.get("volume", {}).get("strong", False)
@@ -680,7 +707,17 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
     # ── 보너스 ────────────────────────────────────────────────
     if bonuses:
         applied_bonus = sum(v for _, v in bonuses)
-        cap_note = f"  <i>(상한:{bonus_cap}pt 적용)</i>" if bonus_total < applied_bonus else ""
+
+        # [v3.4] 역추세 캡(14pt)과 일반 티어드 캡 구분 표시
+        is_ct_cap = (bonus_cap == config.COUNTER_TREND_BONUS_CAP
+                     and bonus_total < applied_bonus)
+        if is_ct_cap:
+            cap_note = f"  <i>(역추세 캡:{bonus_cap}pt 적용)</i>"
+        elif bonus_total < applied_bonus:
+            cap_note = f"  <i>(상한:{bonus_cap}pt 적용)</i>"
+        else:
+            cap_note = ""
+
         lines.append(f"🎁 보너스 +{bonus_total}pt{cap_note}")
         main_b = [(n, v) for n, v in bonuses if v >= 4]
         minor  = sum(v for _, v in bonuses if v < 4)
