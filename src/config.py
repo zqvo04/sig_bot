@@ -1,41 +1,36 @@
 """
-config.py — 전역 설정 (v3.3)
+config.py — 전역 설정 (v3.4)
 ────────────────────────────────────────────────────────────────────
-[v3.3 개선]
+[v3.4 추가]
 
-① SIGNAL_MIN_SCORE 제거
-   기존: regime_threshold와 SIGNAL_MIN_SCORE(63)의 AND 조건
-         → 실질 max(regime,63), 국면별 임계값 무력화
-   수정: SIGNAL_MIN_SCORE 완전 제거, regime_threshold 단독 사용
-   신규 임계값: SQUEEZE 65 / EXPLOSIVE 65 / TRENDING 63 / RANGING 62
+⑦ EXPLOSIVE + BOS 역방향 강화 패널티
+   기존: BOS충돌 ×0.82 단독 → 보너스 누적으로 상쇄 가능
+   수정: EXPLOSIVE 국면에서 BOS 역방향 시 ×0.85 추가 페널티
+         합산 효과: ×0.82 × ×0.85 = ×0.697
+   근거: EXPLOSIVE + 반대 BOS = 강한 추세 한가운데 역행 진입
+         단순 차단보다 강한 페널티로 통과 허들을 높임
 
-② Volume 가중치 재조정
-   volume 가중치 하향, 핵심 지표(taker/rsi/bb)에 재분배
-   RANGING: vol 0.11→0.07 / TRENDING: vol 0.14→0.09
-   EXPLOSIVE: vol 0.17→0.10 / SQUEEZE: vol 0.08→0.05
+⑧ ADX 연동 역추세 임계값 조정
+   기존: EMA 3역방향 → ×0.82 배율만 적용, 임계값 고정
+   수정: EMA 3역방향 + ADX 강도에 따라 임계값 동적 상향
+     ADX >= 45 → +15pt  (강한 추세 중 역행 — 고위험)
+     ADX >= 35 → +10pt
+     ADX >= 25 → +5pt
+   근거: ADX 30 역추세와 ADX 50 역추세는 위험도가 완전히 다름
+         ADX 50 강추세 중 역행은 사실상 추세에 정면 역행
 
-③ 보너스 밸런스
-   FAILED_BREAKOUT: 14→12pt / BOS_CONFIRM: 6→8pt
+⑨ 역추세 보너스 캡 분리 (BOS역방향 + EMA3역방향 동시)
+   기존: 모든 신호에 동일한 티어드 캡(최대 36pt)
+   수정: BOS역방향 AND EMA3역방향 동시 성립 시 캡 14pt로 강제 제한
+   근거: BOS역방향만 있으면 조기 추세 전환 가능성 → 기존 캡 유지
+         BOS+EMA 둘 다 역방향 = 추세 이미 확증 + EMA도 반대 = 진정 역추세
 
-④ Gate 단일 패널티 추가 (GATE_PENALTY_SINGLE = 0.92)
-   하나만 불리 → ×0.92 / 둘 다 불리 → ×0.80
+⑩ FVG 양방향 모호 + 저거래량 신호 차단 (옵션 A)
+   조건: FVG 강세+약세 동시 활성 AND vol_score < 30pt
+   근거: FVG 방향 불명확 + 거래량 미확인 = 진입 근거 없음
+         거래량 충분(30pt+)하면 양방향 FVG도 어느 쪽이든 실제 주문 존재 → 유지
 
-⑤ 거래량 페널티 추가 (v3.3 patch)
-   volume 가중치 5~9%로 낮아 보너스 하나로 상쇄 가능.
-   vol score 기준 명시적 덧셈 페널티 추가:
-     score <  5pt (ratio <  10%) → -7pt
-     score < 15pt (ratio <  30%) → -3pt
-     score ≥ 15pt                →  0pt
-
-⑥ Volume 기준 캔들 및 lookback 개선 (v3.3 patch)
-   문제 ①: 신호는 항상 새 15분봉 시작 시점 → iloc[-1]은 방금 열린 캔들
-            (거래량 ≈ 0) → ratio가 구조적으로 낮게 산출되는 버그
-   문제 ②: lookback 20개(5시간)는 스파이크 오염 취약 + 주말/평일 패턴 미반영
-   수정:
-     - 비교 기준: iloc[-1](진행 중) → iloc[-2](직전 완성 캔들)
-     - lookback: 20 → 48 (5시간 → 12시간)
-     - CANDLE_LIMITS["15m"]=100 기준 버퍼 50개 확보 → 안전
-
+[v3.3] SIGNAL_MIN_SCORE 제거, Volume 정규화, 거래량 페널티, 거래량 lookback 개선
 [v3.2] BOS_CONFLICT_PENALTY = 0.82
 [v3.1] OI 완전 제거
 [v3]   ADX 배율 통합, EMA 배율 정비
@@ -73,12 +68,10 @@ ADX_NO_TREND    = 20
 ADX_WEAK_TREND  = 25
 ADX_STRONG      = 50
 
-# [v3.3 patch ⑥] 20(5시간) → 48(12시간)
-# 비교 기준: 직전 완성 캔들(iloc[-2]) vs 직전 48개 완성 캔들 평균(iloc[-50:-2])
-# CANDLE_LIMITS["15m"]=100 → 버퍼 50개 확보
+# [v3.3 patch] 20(5시간) → 48(12시간), 비교 기준 iloc[-2] (직전 완성 캔들)
 VOLUME_CONFIRM_LOOKBACK   = 48
-VOLUME_SPIKE_MULTIPLIER   = 1.5   # confirmed 기준 → 점수 70pt+
-VOLUME_STRONG_MULTIPLIER  = 2.5   # strong 기준    → 점수 90pt+
+VOLUME_SPIKE_MULTIPLIER   = 1.5
+VOLUME_STRONG_MULTIPLIER  = 2.5
 
 # ══════════════════════════════════════════════════════════════
 # EMA 배율
@@ -111,7 +104,7 @@ LS_LONG_HIGH     = 0.65
 LS_SHORT_EXTREME = 0.62
 LS_SHORT_HIGH    = 0.55
 
-OI_CHANGE_STRONG = 0.05  # 하위 호환용
+OI_CHANGE_STRONG = 0.05
 OI_CHANGE_MILD   = 0.02
 
 TAKER_LOOKBACK    = 100
@@ -258,14 +251,35 @@ CANDLE_MOMENTUM_PENALTY_TRENDING   = 0.90
 GATE_PENALTY_SINGLE = 0.92
 GATE_PENALTY_DUAL   = 0.80
 
-OI_SPIKE_THRESHOLD     = 0.80  # 하위 호환용
+OI_SPIKE_THRESHOLD     = 0.80
 OI_SPIKE_SCORE_PENALTY = 20
 
-# 거래량 페널티 [v3.3 patch ⑤]
-VOLUME_PENALTY_LOW_THRESHOLD = 5    # score <  5pt → -7pt
-VOLUME_PENALTY_MID_THRESHOLD = 15   # score < 15pt → -3pt
+# 거래량 페널티 [v3.3 patch]
+VOLUME_PENALTY_LOW_THRESHOLD = 5
+VOLUME_PENALTY_MID_THRESHOLD = 15
 VOLUME_PENALTY_LOW = -7
 VOLUME_PENALTY_MID = -3
+
+# ── [v3.4] EXPLOSIVE + BOS 역방향 강화 패널티 ────────────────
+# BOS충돌(×0.82) × 추가(×0.85) = 합산 ×0.697
+EXPLOSIVE_BOS_CONFLICT_PENALTY = 0.85
+
+# ── [v3.4] ADX 연동 역추세 임계값 ────────────────────────────
+ADX_COUNTER_TREND_THRESHOLD_STRONG = 45
+ADX_COUNTER_TREND_THRESHOLD_MID    = 35
+ADX_COUNTER_TREND_THRESHOLD_WEAK   = 25
+ADX_COUNTER_TREND_BOOST_STRONG     = 15
+ADX_COUNTER_TREND_BOOST_MID        = 10
+ADX_COUNTER_TREND_BOOST_WEAK       = 5
+
+# ── [v3.4] 역추세 보너스 캡 (BOS역방향 + EMA3역방향 동시) ─────
+# BOS역방향만이면 조기 전환 가능성 → 기존 티어드 캡 유지
+# 둘 다 역방향 = 추세 확증 + EMA 반대 = 진정 역추세 → 캡 강제
+COUNTER_TREND_BONUS_CAP = 14
+
+# ── [v3.4] FVG 양방향 모호 + 저거래량 신호 차단 ─────────────
+# vol_score < 임계값이면 FVG 양방향 모호 신호 차단
+FVG_AMBIGUOUS_VOL_THRESHOLD = 30.0
 
 # ══════════════════════════════════════════════════════════════
 # SMC / 피보나치
