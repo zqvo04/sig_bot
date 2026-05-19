@@ -1,36 +1,23 @@
 """
-config.py — 전역 설정 (v3.4)
+config.py — 전역 설정 (v3.5)
 ────────────────────────────────────────────────────────────────────
-[v3.4 추가]
+[v3.5 추가]
 
-⑦ EXPLOSIVE + BOS 역방향 강화 패널티
-   기존: BOS충돌 ×0.82 단독 → 보너스 누적으로 상쇄 가능
-   수정: EXPLOSIVE 국면에서 BOS 역방향 시 ×0.85 추가 페널티
-         합산 효과: ×0.82 × ×0.85 = ×0.697
-   근거: EXPLOSIVE + 반대 BOS = 강한 추세 한가운데 역행 진입
-         단순 차단보다 강한 페널티로 통과 허들을 높임
+⑪ 거래량 baseline 방식 변경 (1h 캔들 / 4)
+   기존: 직전 완성 15m 캔들 vs 48개 15m 평균 (12시간)
+         문제: 단일 15m 노이즈 심함, 12h 평균은 세션 편향 큼
+   수정: 직전 완성 15m 캔들 vs (120개 1h 평균 / 4)
+         = 직전 완성 15m vs 5일(120h) 1h 캔들 평균 → 15m 기준 환산
+   효과:
+     - baseline 안정성: 1h 합산이므로 15m 단일 노이즈 제거
+     - 요일 정규화: 120h = 5일 평균으로 평일(Mon-Fri) 사이클 완전 포함
+     - 주말 페널티 정확도: 평일 고거래량이 baseline에 포함되어
+                           주말 저거래량 ratio가 낮게 산출 → 페널티 정확 발동
+     - CANDLE_LIMITS["1h"]=210 → 122개 필요 → 여유 88개
+   상수: VOLUME_1H_BASELINE_CANDLES = 120
 
-⑧ ADX 연동 역추세 임계값 조정
-   기존: EMA 3역방향 → ×0.82 배율만 적용, 임계값 고정
-   수정: EMA 3역방향 + ADX 강도에 따라 임계값 동적 상향
-     ADX >= 45 → +15pt  (강한 추세 중 역행 — 고위험)
-     ADX >= 35 → +10pt
-     ADX >= 25 → +5pt
-   근거: ADX 30 역추세와 ADX 50 역추세는 위험도가 완전히 다름
-         ADX 50 강추세 중 역행은 사실상 추세에 정면 역행
-
-⑨ 역추세 보너스 캡 분리 (BOS역방향 + EMA3역방향 동시)
-   기존: 모든 신호에 동일한 티어드 캡(최대 36pt)
-   수정: BOS역방향 AND EMA3역방향 동시 성립 시 캡 14pt로 강제 제한
-   근거: BOS역방향만 있으면 조기 추세 전환 가능성 → 기존 캡 유지
-         BOS+EMA 둘 다 역방향 = 추세 이미 확증 + EMA도 반대 = 진정 역추세
-
-⑩ FVG 양방향 모호 + 저거래량 신호 차단 (옵션 A)
-   조건: FVG 강세+약세 동시 활성 AND vol_score < 30pt
-   근거: FVG 방향 불명확 + 거래량 미확인 = 진입 근거 없음
-         거래량 충분(30pt+)하면 양방향 FVG도 어느 쪽이든 실제 주문 존재 → 유지
-
-[v3.3] SIGNAL_MIN_SCORE 제거, Volume 정규화, 거래량 페널티, 거래량 lookback 개선
+[v3.4] EXPLOSIVE+BOS 강화 패널티, ADX 역추세 임계값, 역추세 보너스 캡, FVG 모호 차단
+[v3.3] SIGNAL_MIN_SCORE 제거, Volume 정규화, 거래량 페널티, lookback iloc[-2]
 [v3.2] BOS_CONFLICT_PENALTY = 0.82
 [v3.1] OI 완전 제거
 [v3]   ADX 배율 통합, EMA 배율 정비
@@ -68,10 +55,16 @@ ADX_NO_TREND    = 20
 ADX_WEAK_TREND  = 25
 ADX_STRONG      = 50
 
-# [v3.3 patch] 20(5시간) → 48(12시간), 비교 기준 iloc[-2] (직전 완성 캔들)
-VOLUME_CONFIRM_LOOKBACK   = 48
-VOLUME_SPIKE_MULTIPLIER   = 1.5
-VOLUME_STRONG_MULTIPLIER  = 2.5
+# ── 거래량 설정 (v3.5) ────────────────────────────────────────
+# 15m baseline = 1h 캔들 120개 평균 / 4
+# 120h(5일) 평균으로 평일 사이클 완전 포함 + 세션 편향 제거
+# CANDLE_LIMITS["1h"]=210 → 122개 필요 → 여유 88개
+VOLUME_1H_BASELINE_CANDLES = 120   # [v3.5] 1h 캔들 lookback 개수
+
+# 하위 호환용 (df_1h 없을 때 폴백)
+VOLUME_CONFIRM_LOOKBACK   = 48     # 폴백 시 15m 캔들 lookback
+VOLUME_SPIKE_MULTIPLIER   = 1.5    # confirmed 기준 → 점수 70pt+
+VOLUME_STRONG_MULTIPLIER  = 2.5    # strong 기준    → 점수 90pt+
 
 # ══════════════════════════════════════════════════════════════
 # EMA 배율
@@ -260,11 +253,10 @@ VOLUME_PENALTY_MID_THRESHOLD = 15
 VOLUME_PENALTY_LOW = -7
 VOLUME_PENALTY_MID = -3
 
-# ── [v3.4] EXPLOSIVE + BOS 역방향 강화 패널티 ────────────────
-# BOS충돌(×0.82) × 추가(×0.85) = 합산 ×0.697
+# [v3.4] EXPLOSIVE + BOS 역방향 강화 패널티
 EXPLOSIVE_BOS_CONFLICT_PENALTY = 0.85
 
-# ── [v3.4] ADX 연동 역추세 임계값 ────────────────────────────
+# [v3.4] ADX 연동 역추세 임계값
 ADX_COUNTER_TREND_THRESHOLD_STRONG = 45
 ADX_COUNTER_TREND_THRESHOLD_MID    = 35
 ADX_COUNTER_TREND_THRESHOLD_WEAK   = 25
@@ -272,13 +264,10 @@ ADX_COUNTER_TREND_BOOST_STRONG     = 15
 ADX_COUNTER_TREND_BOOST_MID        = 10
 ADX_COUNTER_TREND_BOOST_WEAK       = 5
 
-# ── [v3.4] 역추세 보너스 캡 (BOS역방향 + EMA3역방향 동시) ─────
-# BOS역방향만이면 조기 전환 가능성 → 기존 티어드 캡 유지
-# 둘 다 역방향 = 추세 확증 + EMA 반대 = 진정 역추세 → 캡 강제
+# [v3.4] 역추세 보너스 캡
 COUNTER_TREND_BONUS_CAP = 14
 
-# ── [v3.4] FVG 양방향 모호 + 저거래량 신호 차단 ─────────────
-# vol_score < 임계값이면 FVG 양방향 모호 신호 차단
+# [v3.4] FVG 양방향 모호 + 저거래량 신호 차단
 FVG_AMBIGUOUS_VOL_THRESHOLD = 30.0
 
 # ══════════════════════════════════════════════════════════════
