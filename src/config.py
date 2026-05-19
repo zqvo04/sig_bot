@@ -287,10 +287,10 @@ MARKET_STRUCT_SWING_THRESHOLD = 0.005
 # 신호 임계값
 # ══════════════════════════════════════════════════════════════
 REGIME_THRESHOLDS = {
-    "SQUEEZE":   65,
-    "TRENDING":  63,
-    "RANGING":   62,
-    "EXPLOSIVE": 65,
+    "SQUEEZE":   66,
+    "TRENDING":  64,
+    "RANGING":   63,
+    "EXPLOSIVE": 66,
 }
 
 # ══════════════════════════════════════════════════════════════
