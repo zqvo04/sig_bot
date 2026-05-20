@@ -292,7 +292,7 @@ MARKET_STRUCT_SWING_THRESHOLD = 0.005
 REGIME_THRESHOLDS = {
     "SQUEEZE":   66,   # [v3.5 patch] 65→66
     "TRENDING":  64,   # [v3.5 patch] 63→64
-    "RANGING":   63,   # [v3.5 patch] 62→63
+    "RANGING":   64,   # [v3.5 patch] 62→63→64
     "EXPLOSIVE": 66,   # [v3.5 patch] 65→66
 }
 
