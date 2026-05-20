@@ -385,15 +385,15 @@ def calculate_entry_score(analysis: dict, direction: str,
     # ⑭ 거래량 폭발
     vol_ratio = vol.get("ratio", 1.0)
     adx_val   = adx_15m.get("adx", 0.0)
-    if vol_ratio >= 2.5 and adx_val >= 22.0 and ema_same < 3:
+    if vol_ratio >= config.VOLUME_EXPLOSION_MULTIPLIER and adx_val >= 22.0 and ema_same < 3:  # [v3.5 갭2] 2.5→2.0
         bonuses.append(("거래량폭발", config.BONUS_VOLUME_EXPLOSION))
 
     # ⑮ Post-Squeeze 모멘텀
     prev_regime   = analysis.get("prev_regime", "")
-    bb_state      = bb.get("state", "")
+    # [v3.5 비일관성2 수정] bb_state 제거 → bb_state_str 사용 (초반 정의 재활용)
     bb_just_broke = (
-        (d == "long"  and bb_state in ("upper_breakout","near_upper") and bb.get("upper_streak",0) == 1) or
-        (d == "short" and bb_state in ("lower_breakout","near_lower") and bb.get("lower_streak",0) == 1)
+        (d == "long"  and bb_state_str in ("upper_breakout","near_upper") and bb.get("upper_streak",0) == 1) or
+        (d == "short" and bb_state_str in ("lower_breakout","near_lower") and bb.get("lower_streak",0) == 1)
     )
     if (prev_regime == "SQUEEZE" or regime_name == "EXPLOSIVE") and bb_just_broke:
         bonuses.append(
@@ -430,8 +430,10 @@ def calculate_entry_score(analysis: dict, direction: str,
         "거래량강세다이버전스", "거래량약세다이버전스",
         "볼린저극단+RSI다이버전스",
     }
-    vol_ratio = vol.get("ratio", 1.0)
-    if vol_ratio < 0.30:
+    # [v3.5 갭1 수정] vol_ratio<0.30(구 12h 기준) → vol_score<35pt(신 5일 기준)
+    # 구: 주말 score≈0~3pt → 억제 발동 / 신: 주말 score≈30~33pt → vol_ratio<0.30 미발동
+    vol_score_struct = vol.get("score", 50.0)
+    if vol_score_struct < config.VOLUME_PENALTY_MID_THRESHOLD:  # < 35pt
         affected = [(n, v) for n, v in bonuses if n in _LOW_VOL_STRUCT]
         if affected:
             bonuses = [
@@ -441,9 +443,10 @@ def calculate_entry_score(analysis: dict, direction: str,
             before_sum = sum(v for _, v in affected)
             after_sum  = sum(round(v * 0.5) for _, v in affected)
             logger.info(
-                f"[저유동성/{d.upper()}] vol:{vol_ratio:.2f}x < 0.30 "
-                f"→ 구조패턴 보너스 {before_sum}pt → {after_sum}pt (50% 감산) "
-                f"[{', '.join(n for n, _ in affected)}]"
+                f"[저유동성/{d.upper()}] vol:{vol_score_struct:.1f}pt"
+                f" < {config.VOLUME_PENALTY_MID_THRESHOLD}pt"
+                f" → 구조패턴 보너스 {before_sum}pt → {after_sum}pt (50% 감산)"
+                f" [{chr(44).join(n for n, _ in affected)}]"
             )
 
     # ── [v3.4] 역추세 보너스 캡 / 티어드 캡 ─────────────────────
@@ -481,7 +484,7 @@ def calculate_entry_score(analysis: dict, direction: str,
         else:                            candle_momentum_mult = config.CANDLE_MOMENTUM_PENALTY_RANGING
         logger.info(f"[캔들모멘텀] 연속양봉 중 숏 ×{candle_momentum_mult:.2f}")
     elif d == "long" and candle.get("consecutive_bear"):
-        bb_lower_exempt = (bb_state in ("lower_breakout","near_lower") or bb.get("pct_b",0.5) <= 0.15)
+        bb_lower_exempt = (bb_state_str in ("lower_breakout","near_lower") or bb.get("pct_b",0.5) <= 0.15)
         if not bb_lower_exempt:
             if regime_name == "TRENDING":    candle_momentum_mult = config.CANDLE_MOMENTUM_PENALTY_TRENDING
             elif regime_name == "EXPLOSIVE": candle_momentum_mult = config.CANDLE_MOMENTUM_PENALTY_EXPLOSIVE
@@ -603,7 +606,7 @@ def calculate_entry_score(analysis: dict, direction: str,
     breakdown = _build_breakdown(
         d, scores, weights, raw_score, ema_mult, gate_penalty,
         mtf_penalty, exhaustion_mult, choch_penalty, bos_conflict_penalty,
-        explosive_bos_penalty, bonuses, bonus_cap, final_score,
+        explosive_bos_penalty, candle_momentum_mult, bonuses, bonus_cap, final_score,
         gate, regime, micro_penalty, volume_penalty
     )
     return {
@@ -622,7 +625,7 @@ def calculate_entry_score(analysis: dict, direction: str,
 
 
 def _build_breakdown(d, scores, weights, raw, ema_m, pen,
-                     mtf_m, exh_m, choch_m, bos_m, exp_bos_m,
+                     mtf_m, exh_m, candle_m, choch_m, bos_m, exp_bos_m,
                      bonuses, bonus_cap, final, gate, regime,
                      micro_penalty=0, volume_penalty=0) -> str:
     label = "🟢 롱" if d == "long" else "🔴 숏"
@@ -637,6 +640,7 @@ def _build_breakdown(d, scores, weights, raw, ema_m, pen,
     if pen         < 1.0: lines.append(f"  복합 페널티             × {pen:.2f}")
     if mtf_m       < 1.0: lines.append(f"  MTF RSI 패널티          × {mtf_m:.2f}")
     if exh_m       < 1.0: lines.append(f"  EXPLOSIVE 소진 패널티   × {exh_m:.2f}")
+    if candle_m     < 1.0: lines.append(f"  캔들모멘텀 역방향 패널티  × {candle_m:.2f}")
     if choch_m     < 1.0: lines.append(f"  CHoCH 역방향 패널티     × {choch_m:.2f}")
     if bos_m       < 1.0: lines.append(f"  BOS 역방향 패널티       × {bos_m:.2f}")
     if exp_bos_m   < 1.0: lines.append(f"  EXPLOSIVE+BOS 강화패널티× {exp_bos_m:.2f}")
