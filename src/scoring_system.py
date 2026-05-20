@@ -310,10 +310,18 @@ def calculate_entry_score(analysis: dict, direction: str,
 
     # ⑦ 거래량-가격 다이버전스
     vpd = analysis.get("vol_price_div", {})
+    # [A] RANGING 국면 거래량다이버전스 40% 감액: 박스권 잡음 신호 과발동 방지
+    _vpd_mult = 0.60 if regime_name == "RANGING" else 1.0
     if d == "short" and vpd.get("bearish_vol_div"):
-        bonuses.append(("거래량약세다이버전스", config.BONUS_VOL_PRICE_DIV))
+        _vpd_val = round(config.BONUS_VOL_PRICE_DIV * _vpd_mult)
+        bonuses.append(("거래량약세다이버전스", _vpd_val))
+        if _vpd_mult < 1.0:
+            logger.info(f"[거래량Div/RANGING] +{config.BONUS_VOL_PRICE_DIV}→+{_vpd_val}pt (40% 감액)")
     elif d == "long" and vpd.get("bullish_vol_div"):
-        bonuses.append(("거래량강세다이버전스", config.BONUS_VOL_PRICE_DIV))
+        _vpd_val = round(config.BONUS_VOL_PRICE_DIV * _vpd_mult)
+        bonuses.append(("거래량강세다이버전스", _vpd_val))
+        if _vpd_mult < 1.0:
+            logger.info(f"[거래량Div/RANGING] +{config.BONUS_VOL_PRICE_DIV}→+{_vpd_val}pt (40% 감액)")
 
     # ⑧ 돌파/붕괴 실패
     ms = analysis.get("market_structure", {})
@@ -521,12 +529,28 @@ def calculate_entry_score(analysis: dict, direction: str,
         volume_penalty = 0
 
     # ── 최종 점수 ────────────────────────────────────────────────
+    # ── [C] RANGING + BOS역방향 + 저ADX → 추가 억제 ────────────
+    # 시장 방향성 근거가 약한 상태에서의 역추세 진입 차단
+    # 좋은 신호(BOS 충돌 없음)에는 미발동
+    ranging_bos_weak_penalty = 1.0
+    _adx_cur = adx_15m.get("adx", 0.0)
+    if (bos_conflict_penalty < 1.0
+            and _adx_cur < config.ADX_WEAK_TREND
+            and regime_name == "RANGING"):
+        ranging_bos_weak_penalty = 0.90
+        logger.info(
+            f"[저ADX+BOS역방향/{d.upper()}] "
+            f"RANGING+BOS역방향+ADX:{_adx_cur:.0f}<{config.ADX_WEAK_TREND} "
+            f"→ ×{ranging_bos_weak_penalty:.2f} 추가 (합산 ×{bos_conflict_penalty*ranging_bos_weak_penalty:.3f})"
+        )
+
     soft_penalty = (
         mtf_penalty *
         exhaustion_mult *
         candle_momentum_mult *
         choch_penalty *
         bos_conflict_penalty *
+        ranging_bos_weak_penalty *
         explosive_bos_penalty
     )
     micro_penalty = micro_result.get("total_penalty", 0) if micro_result else 0
@@ -606,7 +630,8 @@ def calculate_entry_score(analysis: dict, direction: str,
     breakdown = _build_breakdown(
         d, scores, weights, raw_score, ema_mult, gate_penalty,
         mtf_penalty, exhaustion_mult, choch_penalty, bos_conflict_penalty,
-        explosive_bos_penalty, candle_momentum_mult, bonuses, bonus_cap, final_score,
+        explosive_bos_penalty, candle_momentum_mult, ranging_bos_weak_penalty,
+        bonuses, bonus_cap, final_score,
         gate, regime, micro_penalty, volume_penalty
     )
     return {
@@ -620,12 +645,14 @@ def calculate_entry_score(analysis: dict, direction: str,
         "candle_momentum_mult": candle_momentum_mult, "choch_penalty": choch_penalty,
         "bos_conflict_penalty": bos_conflict_penalty,
         "explosive_bos_penalty": explosive_bos_penalty,
+        "ranging_bos_weak_penalty": ranging_bos_weak_penalty,
         "volume_penalty": volume_penalty,
     }
 
 
 def _build_breakdown(d, scores, weights, raw, ema_m, pen,
-                     mtf_m, exh_m, candle_m, choch_m, bos_m, exp_bos_m,
+                     mtf_m, exh_m, choch_m, bos_m, exp_bos_m,
+                     candle_m, ranging_bos_m,
                      bonuses, bonus_cap, final, gate, regime,
                      micro_penalty=0, volume_penalty=0) -> str:
     label = "🟢 롱" if d == "long" else "🔴 숏"
@@ -643,7 +670,8 @@ def _build_breakdown(d, scores, weights, raw, ema_m, pen,
     if candle_m     < 1.0: lines.append(f"  캔들모멘텀 역방향 패널티  × {candle_m:.2f}")
     if choch_m     < 1.0: lines.append(f"  CHoCH 역방향 패널티     × {choch_m:.2f}")
     if bos_m       < 1.0: lines.append(f"  BOS 역방향 패널티       × {bos_m:.2f}")
-    if exp_bos_m   < 1.0: lines.append(f"  EXPLOSIVE+BOS 강화패널티× {exp_bos_m:.2f}")
+    if exp_bos_m     < 1.0: lines.append(f"  EXPLOSIVE+BOS 강화패널티  × {exp_bos_m:.2f}")
+    if ranging_bos_m < 1.0: lines.append(f"  저ADX+BOS역방향 추가패널티× {ranging_bos_m:.2f}")
     if bonuses:
         lines.append(f"  보너스 (상한:{bonus_cap}pt):")
         for name, val in bonuses:
