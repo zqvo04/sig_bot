@@ -94,6 +94,28 @@ def calculate_entry_score(analysis: dict, direction: str,
         scores["long_short_ratio"] = 50.0
         logger.info(f"[EMA3역방향] LS 중립화: {ls_raw_before:.0f}→50pt [{d.upper()}]")
 
+
+    # ── [v3.5 개선②] BB 스퀴즈 + 방향 반대 위치 → BB 점수 중립화 ────
+    # 스퀴즈 상단(숏신호) = 상방 돌파 가능성 → 숏 BB 점수 과대 방지
+    # 스퀴즈 하단(롱신호) = 하방 돌파 가능성 → 롱 BB 점수 과대 방지
+    _bb_squeeze = bb.get("squeeze", False)
+    if _bb_squeeze:
+        _orig_bb = scores["bollinger"]
+        if d == "short" and bb_state_str in ("near_upper","upper_zone","upper_breakout"):
+            scores["bollinger"] = min(scores["bollinger"], 52.0)
+            if _orig_bb != scores["bollinger"]:
+                logger.info(
+                    f"[BB스퀴즈/{d.upper()}] 상단스퀴즈 BB중립화: "
+                    f"{_orig_bb:.0f}→{scores['bollinger']:.0f}pt (상방돌파 가능성)"
+                )
+        elif d == "long" and bb_state_str in ("near_lower","lower_zone","lower_breakout"):
+            scores["bollinger"] = max(scores["bollinger"], 48.0)
+            if _orig_bb != scores["bollinger"]:
+                logger.info(
+                    f"[BB스퀴즈/{d.upper()}] 하단스퀴즈 BB중립화: "
+                    f"{_orig_bb:.0f}→{scores['bollinger']:.0f}pt (하방돌파 가능성)"
+                )
+
     raw_score = sum(scores[k] * weights[k] for k in weights)
 
     # ── EMA 배율 ─────────────────────────────────────────────────
@@ -241,8 +263,14 @@ def calculate_entry_score(analysis: dict, direction: str,
     # ② 볼린저 극단 + RSI 다이버전스
     bb_extreme = bb_state_str in ("lower_breakout", "near_lower", "upper_breakout", "near_upper")
     has_div    = rsi.get("bullish_divergence") if d == "long" else rsi.get("bearish_divergence")
-    if bb_extreme and has_div:
+    # [v3.5 개선①] RSI 극단 구간일 때만 다이버전스 보너스 지급
+    # 숏: RSI >= 65 / 롱: RSI <= 38 미충족 시 RANGING 잡음으로 간주
+    _div_rsi_ok = ((d == "long" and rsi_val_15m <= 38) or
+                   (d == "short" and rsi_val_15m >= 65))
+    if bb_extreme and has_div and _div_rsi_ok:
         bonuses.append(("볼린저극단+RSI다이버전스", config.BONUS_BB_RSI_ALIGN))
+    elif bb_extreme and has_div:
+        logger.info(f"[볼린저Div/{d.upper()}] RSI:{rsi_val_15m:.0f} 극단조건 미충족 → 보너스 미지급")
 
     # ③ 펀딩비 + 롱숏비율 동일 방향
     fr_bias = funding.get("bias", "neutral")
@@ -563,6 +591,15 @@ def calculate_entry_score(analysis: dict, direction: str,
 
     # ── [v3.4] ADX 연동 역추세 임계값 조정 ──────────────────────
     regime_threshold = regime.get("threshold", config.REGIME_THRESHOLDS.get("TRENDING", 63))
+
+    # ── [v3.5 개선③] BB 스퀴즈 감지 시 임계값 +2pt 상향 ─────────
+    # 스퀴즈는 방향 불확실 구간 → 더 높은 확신 요구
+    # SQUEEZE 국면(임계 66)은 이미 반영됨 → RANGING+스퀴즈 보완
+    if bb.get("squeeze", False) and regime_threshold < 66:
+        regime_threshold = min(66, regime_threshold + 2)
+        logger.info(
+            f"[BB스퀴즈임계/{d.upper()}] BB 스퀴즈 감지 → 임계값 +2pt = {regime_threshold}pt"
+        )
 
     if ema_all_reverse and not bb_reversal_exempt:
         adx_val_ct = adx_15m.get("adx", 0.0)
