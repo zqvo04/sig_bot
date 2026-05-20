@@ -65,6 +65,9 @@ VOLUME_1H_BASELINE_CANDLES = 120   # [v3.5] 1h 캔들 lookback 개수
 VOLUME_CONFIRM_LOOKBACK   = 48     # 폴백 시 15m 캔들 lookback
 VOLUME_SPIKE_MULTIPLIER   = 1.5    # confirmed 기준 → 점수 70pt+
 VOLUME_STRONG_MULTIPLIER  = 2.5    # strong 기준    → 점수 90pt+
+VOLUME_EXPLOSION_MULTIPLIER = 2.0  # [v3.5 수정] 거래량폭발 보너스 기준
+                                   #  구: 2.5x (신 5일 baseline 기준 너무 어려움)
+                                   #  신: 2.0x (5일 평균의 2배 이상)
 
 # ══════════════════════════════════════════════════════════════
 # EMA 배율
@@ -248,10 +251,10 @@ OI_SPIKE_THRESHOLD     = 0.80
 OI_SPIKE_SCORE_PENALTY = 20
 
 # 거래량 페널티 [v3.3 patch]
-VOLUME_PENALTY_LOW_THRESHOLD = 5
-VOLUME_PENALTY_MID_THRESHOLD = 15
-VOLUME_PENALTY_LOW = -7
-VOLUME_PENALTY_MID = -3
+VOLUME_PENALTY_LOW_THRESHOLD = 20   # [v3.5 patch] score < 20pt (ratio < 40%)
+VOLUME_PENALTY_MID_THRESHOLD = 35   # [v3.5 patch] score < 35pt (ratio < 70%)
+VOLUME_PENALTY_LOW = -8             # [v3.5 patch] -7 → -8 (소폭 상향)
+VOLUME_PENALTY_MID = -5             # [v3.5 patch] -3 → -5 (실질적 상향)
 
 # [v3.4] EXPLOSIVE + BOS 역방향 강화 패널티
 EXPLOSIVE_BOS_CONFLICT_PENALTY = 0.85
@@ -287,10 +290,10 @@ MARKET_STRUCT_SWING_THRESHOLD = 0.005
 # 신호 임계값
 # ══════════════════════════════════════════════════════════════
 REGIME_THRESHOLDS = {
-    "SQUEEZE":   66,
-    "TRENDING":  64,
-    "RANGING":   63,
-    "EXPLOSIVE": 66,
+    "SQUEEZE":   66,   # [v3.5 patch] 65→66
+    "TRENDING":  64,   # [v3.5 patch] 63→64
+    "RANGING":   63,   # [v3.5 patch] 62→63
+    "EXPLOSIVE": 66,   # [v3.5 patch] 65→66
 }
 
 # ══════════════════════════════════════════════════════════════
