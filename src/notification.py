@@ -244,26 +244,7 @@ def build_signal_message(pipeline_result: dict, analysis: dict) -> str:
         lines.append(f"🏛 SMC 확인: <b>{' | '.join(smc_tags)}</b>")
     lines.append(f"🕐 {now}")
     lines.append("")
-
-    # ── ATR 기반 SL/TP ────────────────────────────────────────
-    atr_val = atr.get("current", 0.0)
-    sl_price, tp_price, sl_pct, tp_pct = _calc_sl_tp(
-        price, direction, atr_val, entry_price=micro_entry
-    )
-    if sl_price and tp_price:
-        entry_note = ""
-        if micro_entry and micro_entry != price:
-            pct_diff = abs(micro_entry - price) / price * 100
-            entry_note = (
-                f"  <i>← OB벽 회피 ({pct_diff:.2f}% "
-                f"{'아래' if direction=='long' else '위'})</i>"
-            )
-        lines.append("📍 <b>진입 가이드</b>  <i>(ATR×1.5 기준, 참고용)</i>")
-        lines.append(f"  💰 진입가: <b>{_fmt_price(micro_entry or price, symbol)}</b>{entry_note}")
-        lines.append(f"  🛑 손절가: <b>{_fmt_price(sl_price, symbol)}</b>  (-{sl_pct}%)")
-        lines.append(f"  🎯 목표가: <b>{_fmt_price(tp_price, symbol)}</b>  (+{tp_pct}%,  RR 1:2)")
-        lines.append(f"  📊 ATR: ${atr_val:,.2f}  ×{atr.get('ratio',1.0):.1f}배")
-        lines.append("")
+    
 
     # ── 마이크로구조 필터 ─────────────────────────────────────
     if micro_details:
