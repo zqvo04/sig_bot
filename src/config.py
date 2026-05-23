@@ -270,6 +270,14 @@ ADX_COUNTER_TREND_BOOST_WEAK       = 5
 # [v3.4] 역추세 보너스 캡
 COUNTER_TREND_BONUS_CAP = 14
 
+# [v3.5 B] BOS역방향 단독 보너스 캡 (EMA3역방향 없을 때)
+BOS_ONLY_BONUS_CAP = 22
+
+# [v3.5 C강화] 저ADX+BOS역방향 억제 ADX 임계값 (REGIME_TREND_ADX와 독립)
+# 구: ADX_WEAK_TREND(25) → ADX 26~29 억제 안 됨
+# 신: 30으로 확대 → RANGING+BOS역방향+ADX<30 → ×0.90 추가
+ADX_BOS_COUNTER_THRESHOLD = 30
+
 # [v3.4] FVG 양방향 모호 + 저거래량 신호 차단
 FVG_AMBIGUOUS_VOL_THRESHOLD = 30.0
 
@@ -292,7 +300,7 @@ MARKET_STRUCT_SWING_THRESHOLD = 0.005
 REGIME_THRESHOLDS = {
     "SQUEEZE":   66,   # [v3.5 patch] 65→66
     "TRENDING":  64,   # [v3.5 patch] 63→64
-    "RANGING":   64,   # [v3.5 patch] 62→63→64
+    "RANGING":   63,   # [v3.5 patch] 62→63
     "EXPLOSIVE": 66,   # [v3.5 patch] 65→66
 }
 
