@@ -1,21 +1,19 @@
 """
-config.py — 전역 설정 (v3.5)
+config.py — 전역 설정 (v3.6)
 ────────────────────────────────────────────────────────────────────
-[v3.5 추가]
+[v3.6 추가]
 
-⑪ 거래량 baseline 방식 변경 (1h 캔들 / 4)
-   기존: 직전 완성 15m 캔들 vs 48개 15m 평균 (12시간)
-         문제: 단일 15m 노이즈 심함, 12h 평균은 세션 편향 큼
-   수정: 직전 완성 15m 캔들 vs (120개 1h 평균 / 4)
-         = 직전 완성 15m vs 5일(120h) 1h 캔들 평균 → 15m 기준 환산
-   효과:
-     - baseline 안정성: 1h 합산이므로 15m 단일 노이즈 제거
-     - 요일 정규화: 120h = 5일 평균으로 평일(Mon-Fri) 사이클 완전 포함
-     - 주말 페널티 정확도: 평일 고거래량이 baseline에 포함되어
-                           주말 저거래량 ratio가 낮게 산출 → 페널티 정확 발동
-     - CANDLE_LIMITS["1h"]=210 → 122개 필요 → 여유 88개
-   상수: VOLUME_1H_BASELINE_CANDLES = 120
+⑫ 히든 다이버전스 최소 ADX 가드 (개선안 1)
+   조건: regime in (RANGING, SQUEEZE) AND adx < HIDDEN_DIV_MIN_ADX
+   효과: 추세 없는 구간에서 히든 다이버전스 보너스 미지급
+   상수: HIDDEN_DIV_MIN_ADX = 18
 
+⑬ SQUEEZE 국면 캔들 보너스 감액 (개선안 3)
+   조건: regime == SQUEEZE
+   효과: 핀바/인걸핑 보너스 × 0.50 (방향 미결정 구간 신뢰도 저하)
+   상수: SQUEEZE_CANDLE_BONUS_MULT = 0.50
+
+[v3.5] 거래량 baseline 1h 캔들 / 4
 [v3.4] EXPLOSIVE+BOS 강화 패널티, ADX 역추세 임계값, 역추세 보너스 캡, FVG 모호 차단
 [v3.3] SIGNAL_MIN_SCORE 제거, Volume 정규화, 거래량 페널티, lookback iloc[-2]
 [v3.2] BOS_CONFLICT_PENALTY = 0.82
@@ -56,18 +54,11 @@ ADX_WEAK_TREND  = 25
 ADX_STRONG      = 50
 
 # ── 거래량 설정 (v3.5) ────────────────────────────────────────
-# 15m baseline = 1h 캔들 120개 평균 / 4
-# 120h(5일) 평균으로 평일 사이클 완전 포함 + 세션 편향 제거
-# CANDLE_LIMITS["1h"]=210 → 122개 필요 → 여유 88개
-VOLUME_1H_BASELINE_CANDLES = 120   # [v3.5] 1h 캔들 lookback 개수
-
-# 하위 호환용 (df_1h 없을 때 폴백)
-VOLUME_CONFIRM_LOOKBACK   = 48     # 폴백 시 15m 캔들 lookback
-VOLUME_SPIKE_MULTIPLIER   = 1.5    # confirmed 기준 → 점수 70pt+
-VOLUME_STRONG_MULTIPLIER  = 2.5    # strong 기준    → 점수 90pt+
-VOLUME_EXPLOSION_MULTIPLIER = 2.0  # [v3.5 수정] 거래량폭발 보너스 기준
-                                   #  구: 2.5x (신 5일 baseline 기준 너무 어려움)
-                                   #  신: 2.0x (5일 평균의 2배 이상)
+VOLUME_1H_BASELINE_CANDLES = 120
+VOLUME_CONFIRM_LOOKBACK   = 48
+VOLUME_SPIKE_MULTIPLIER   = 1.5
+VOLUME_STRONG_MULTIPLIER  = 2.5
+VOLUME_EXPLOSION_MULTIPLIER = 2.0
 
 # ══════════════════════════════════════════════════════════════
 # EMA 배율
@@ -243,6 +234,10 @@ CANDLE_MOMENTUM_PENALTY_RANGING   = 0.80
 CANDLE_MOMENTUM_PENALTY_EXPLOSIVE  = 0.85
 CANDLE_MOMENTUM_PENALTY_TRENDING   = 0.90
 
+# [v3.6] SQUEEZE 국면 캔들 패턴 보너스 감액 배율 (개선안 3)
+# 방향 미결정 구간에서 단일 캔들 신뢰도 저하 반영
+SQUEEZE_CANDLE_BONUS_MULT = 0.50
+
 # Gate 패널티
 GATE_PENALTY_SINGLE = 0.92
 GATE_PENALTY_DUAL   = 0.80
@@ -251,10 +246,10 @@ OI_SPIKE_THRESHOLD     = 0.80
 OI_SPIKE_SCORE_PENALTY = 20
 
 # 거래량 페널티 [v3.3 patch]
-VOLUME_PENALTY_LOW_THRESHOLD = 20   # [v3.5 patch] score < 20pt (ratio < 40%)
-VOLUME_PENALTY_MID_THRESHOLD = 35   # [v3.5 patch] score < 35pt (ratio < 70%)
-VOLUME_PENALTY_LOW = -8             # [v3.5 patch] -7 → -8 (소폭 상향)
-VOLUME_PENALTY_MID = -5             # [v3.5 patch] -3 → -5 (실질적 상향)
+VOLUME_PENALTY_LOW_THRESHOLD = 20
+VOLUME_PENALTY_MID_THRESHOLD = 35
+VOLUME_PENALTY_LOW = -8
+VOLUME_PENALTY_MID = -5
 
 # [v3.4] EXPLOSIVE + BOS 역방향 강화 패널티
 EXPLOSIVE_BOS_CONFLICT_PENALTY = 0.85
@@ -270,16 +265,19 @@ ADX_COUNTER_TREND_BOOST_WEAK       = 5
 # [v3.4] 역추세 보너스 캡
 COUNTER_TREND_BONUS_CAP = 14
 
-# [v3.5 B] BOS역방향 단독 보너스 캡 (EMA3역방향 없을 때)
+# [v3.5 B] BOS역방향 단독 보너스 캡
 BOS_ONLY_BONUS_CAP = 22
 
-# [v3.5 C강화] 저ADX+BOS역방향 억제 ADX 임계값 (REGIME_TREND_ADX와 독립)
-# 구: ADX_WEAK_TREND(25) → ADX 26~29 억제 안 됨
-# 신: 30으로 확대 → RANGING+BOS역방향+ADX<30 → ×0.90 추가
+# [v3.5 C강화] 저ADX+BOS역방향 억제 ADX 임계값
 ADX_BOS_COUNTER_THRESHOLD = 30
 
 # [v3.4] FVG 양방향 모호 + 저거래량 신호 차단
 FVG_AMBIGUOUS_VOL_THRESHOLD = 30.0
+
+# [v3.6] 히든 다이버전스 최소 ADX (개선안 1)
+# RANGING/SQUEEZE에서 ADX < 이 값이면 히든 다이버전스 보너스 미지급
+# 히든 다이버전스 = 추세 지속 신호 → 추세 없는 구간에서 의미 없음
+HIDDEN_DIV_MIN_ADX = 18
 
 # ══════════════════════════════════════════════════════════════
 # SMC / 피보나치
@@ -298,10 +296,10 @@ MARKET_STRUCT_SWING_THRESHOLD = 0.005
 # 신호 임계값
 # ══════════════════════════════════════════════════════════════
 REGIME_THRESHOLDS = {
-    "SQUEEZE":   66,   # [v3.5 patch] 65→66
-    "TRENDING":  64,   # [v3.5 patch] 63→64
-    "RANGING":   63,   # [v3.5 patch] 62→63
-    "EXPLOSIVE": 66,   # [v3.5 patch] 65→66
+    "SQUEEZE":   66,
+    "TRENDING":  64,
+    "RANGING":   63,
+    "EXPLOSIVE": 66,
 }
 
 # ══════════════════════════════════════════════════════════════
