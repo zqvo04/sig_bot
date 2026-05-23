@@ -116,6 +116,22 @@ def calculate_entry_score(analysis: dict, direction: str,
                     f"{_orig_bb:.0f}→{scores['bollinger']:.0f}pt (하방돌파 가능성)"
                 )
 
+
+    # ── [A] BOS역방향 → LS 점수 중립화 ──────────────────────────────
+    # BOS가 역방향 확증 → LS 극단값(반대매매 논리) 신뢰 불가
+    # 이미 불리한 방향이면 유지 (억제 중이므로 건드리지 않음)
+    _bos_pre = analysis.get("bos_choch", {})
+    _bos_reverse_pre = (
+        (d == "long"  and _bos_pre.get("bos_bearish")) or
+        (d == "short" and _bos_pre.get("bos_bullish"))
+    )
+    if _bos_reverse_pre:
+        _ls_s = scores["long_short_ratio"]
+        _ls_already_bad = ((d=="long" and _ls_s < 50) or (d=="short" and _ls_s > 50))
+        if not _ls_already_bad:
+            scores["long_short_ratio"] = 50.0
+            logger.info(f"[BOS역방향/A] LS 중립화: {_ls_s:.0f}→50pt [{d.upper()}]")
+
     raw_score = sum(scores[k] * weights[k] for k in weights)
 
     # ── EMA 배율 ─────────────────────────────────────────────────
@@ -298,7 +314,10 @@ def calculate_entry_score(analysis: dict, direction: str,
         (d == "long"  and liq_signal == "long_liq_detected") or
         (d == "short" and liq_signal == "short_liq_detected")
     ):
-        bonuses.append(("대규모청산꼬리", config.BONUS_LIQUIDATION))
+        if _bos_reverse_pre:  # [D] BOS역방향 → 청산보너스 억제
+            logger.info(f"[청산보너스/D/{d.upper()}] BOS역방향 확증 → 대규모청산꼬리 억제 (0pt)")
+        else:
+            bonuses.append(("대규모청산꼬리", config.BONUS_LIQUIDATION))
 
     # ⑤ 추세 지속 (EMA+Taker)
     ema_same   = ema_info.get("same_count", 0)
@@ -503,6 +522,16 @@ def calculate_entry_score(analysis: dict, direction: str,
                 f"BOS역방향+EMA3역방향 → 보너스 {bonus_raw}→{bonus_total}pt "
                 f"(캡:{bonus_cap}pt)"
             )
+    elif bos_conflict_penalty < 1.0:
+        # [B] BOS역방향 단독 → 22pt 캡 (기존 티어드 캡보다 낮게)
+        bonus_cap   = config.BOS_ONLY_BONUS_CAP
+        bonus_total = min(bonus_cap, bonus_raw)
+        if bonus_raw > bonus_cap:
+            logger.info(
+                f"[BOS역방향캡/{d.upper()}] "
+                f"BOS역방향 단독 → 보너스 {bonus_raw}→{bonus_total}pt "
+                f"(캡:{bonus_cap}pt)"
+            )
     else:
         bonus_cap   = _get_tiered_bonus_cap(base_score)
         bonus_total = min(bonus_cap, bonus_raw)
@@ -563,12 +592,12 @@ def calculate_entry_score(analysis: dict, direction: str,
     ranging_bos_weak_penalty = 1.0
     _adx_cur = adx_15m.get("adx", 0.0)
     if (bos_conflict_penalty < 1.0
-            and _adx_cur < config.ADX_WEAK_TREND
+            and _adx_cur < config.ADX_BOS_COUNTER_THRESHOLD  # [C강화] 25→30
             and regime_name == "RANGING"):
         ranging_bos_weak_penalty = 0.90
         logger.info(
             f"[저ADX+BOS역방향/{d.upper()}] "
-            f"RANGING+BOS역방향+ADX:{_adx_cur:.0f}<{config.ADX_WEAK_TREND} "
+            f"RANGING+BOS역방향+ADX:{_adx_cur:.0f}<{config.ADX_BOS_COUNTER_THRESHOLD} "
             f"→ ×{ranging_bos_weak_penalty:.2f} 추가 (합산 ×{bos_conflict_penalty*ranging_bos_weak_penalty:.3f})"
         )
 
