@@ -1,23 +1,20 @@
 """
-scoring_system.py — 점수 산출 (v3.6)
+scoring_system.py — 점수 산출 (v3.7)
 ────────────────────────────────────────────────────────────────────
-[v3.6 변경]
+[v3.7 추가]
 
-⑯ 히든 다이버전스 ADX 가드 (개선안 1)
-   조건: regime in (RANGING, SQUEEZE) AND adx < HIDDEN_DIV_MIN_ADX(18)
-   효과: 추세 지속 전제 보너스를 추세 없는 구간에서 차단
-   위치: 보너스 ⑫ 히든 다이버전스 섹션
+⑲ EXPLOSIVE 준과매도/과매수 역방향 패널티 (P1)
+   숏: regime==EXPLOSIVE AND rsi_1h<45 AND pct_b<0.25 → ×0.80
+   롱: regime==EXPLOSIVE AND rsi_1h>55 AND pct_b>0.75 → ×0.80
+   위치: soft_penalty 체인 (exhaustion_mult 직후)
+   근거: EXPLOSIVE 가중치 LS+Taker=62% 구조에서 RSI/BB 반등 신호 압도 보정
 
-⑰ HigherLow/LowerHigh 구조 보너스 RANGING/SQUEEZE 차단 (개선안 2)
-   조건: regime in (RANGING, SQUEEZE)
-   효과: 박스권 왕복 노이즈를 추세 구조로 오인하는 보너스 제거
-   위치: 보너스 ⑧ 돌파/붕괴 실패 섹션
-   비고: 돌파실패/붕괴실패 보너스는 영향 없음 (유지)
+⑳ 청산 역방향 소프트 패널티 (P3)
+   조건: liq.favorable_direction ≠ direction
+   적용: ×0.92, soft_penalty 체인 편입
+   위치: explosive_oversold_mult 직후
 
-⑱ SQUEEZE 국면 캔들 패턴 보너스 감액 (개선안 3)
-   조건: regime == SQUEEZE
-   적용: 핀바/인걸핑 보너스 × SQUEEZE_CANDLE_BONUS_MULT(0.50)
-   위치: Taker 역방향 캔들 감산 직후 (동일 _CANDLE 집합 재활용)
+[v3.6] 히든다이버전스 ADX 가드, HL/LH 구조 RANGING 차단, SQUEEZE 캔들 감액
 
 [v3.4 추가]
 ⑦ EXPLOSIVE + BOS 역방향 강화 패널티
@@ -204,6 +201,49 @@ def calculate_entry_score(analysis: dict, direction: str,
             exhaustion_reason = f"EXPLOSIVE 소진(1h RSI:{rsi_1h:.1f}) → 숏 ×{exhaustion_mult}"
     if exhaustion_mult < 1.0:
         logger.info(f"[EXPLOSIVE소진/{d.upper()}] {exhaustion_reason}")
+
+    # ── [v3.7 P1] EXPLOSIVE 준과매도/과매수 역방향 패널티 ────────
+    # EXPLOSIVE 가중치: LS(24%)+Taker(38%)=62%, RSI(7%)+BB(6%)=13%
+    # → RSI/BB가 반등/반락을 가리켜도 LS 극단값이 구조적으로 압도
+    # → 진입 타이밍이 과매도/과매수 소진 구간일 때 추가 보정
+    explosive_oversold_mult = 1.0
+    if regime_name == "EXPLOSIVE":
+        _pct_b_p1 = bb.get("pct_b", 0.5)
+        if (d == "short" and
+                rsi_val_1h < config.EXPLOSIVE_OVERSOLD_GUARD_RSI and
+                _pct_b_p1  < config.EXPLOSIVE_OVERSOLD_GUARD_BB):
+            explosive_oversold_mult = config.EXPLOSIVE_OVERSOLD_PENALTY
+            logger.info(
+                f"[EXPLOSIVE준과매도/{d.upper()}] "
+                f"1h RSI:{rsi_val_1h:.0f}<{config.EXPLOSIVE_OVERSOLD_GUARD_RSI} "
+                f"+ %B:{_pct_b_p1:.2f}<{config.EXPLOSIVE_OVERSOLD_GUARD_BB} "
+                f"→ 과매도 반등 위험 ×{explosive_oversold_mult:.2f}"
+            )
+        elif (d == "long" and
+                rsi_val_1h > config.EXPLOSIVE_OVERBOUGHT_GUARD_RSI and
+                _pct_b_p1  > config.EXPLOSIVE_OVERBOUGHT_GUARD_BB):
+            explosive_oversold_mult = config.EXPLOSIVE_OVERSOLD_PENALTY
+            logger.info(
+                f"[EXPLOSIVE준과매수/{d.upper()}] "
+                f"1h RSI:{rsi_val_1h:.0f}>{config.EXPLOSIVE_OVERBOUGHT_GUARD_RSI} "
+                f"+ %B:{_pct_b_p1:.2f}>{config.EXPLOSIVE_OVERBOUGHT_GUARD_BB} "
+                f"→ 과매수 반락 위험 ×{explosive_oversold_mult:.2f}"
+            )
+
+    # ── [v3.7 P3] 청산 역방향 소프트 패널티 ─────────────────────
+    # 청산 감지 방향이 진입 방향과 반대 = 단기 역풍 가능성
+    # 기존: 알림에 "역방향 주의" 표시만, 점수 미반영 → 이번에 수치화
+    liq_reverse_mult = 1.0
+    _liq_fav = liq.get("favorable_direction")
+    if (_liq_fav is not None and
+            _liq_fav != d and
+            liq.get("signal", "none") != "none"):
+        liq_reverse_mult = config.LIQ_REVERSE_PENALTY
+        logger.info(
+            f"[청산역방향/{d.upper()}] "
+            f"청산유리:{_liq_fav} ≠ 진입:{d} "
+            f"→ 역방향 역풍 ×{liq_reverse_mult:.2f}"
+        )
 
     # ── BB 연속 이탈 억제 ────────────────────────────────────────
     BB_STREAK    = 3
@@ -637,6 +677,8 @@ def calculate_entry_score(analysis: dict, direction: str,
     soft_penalty = (
         mtf_penalty *
         exhaustion_mult *
+        explosive_oversold_mult *   # [v3.7 P1] EXPLOSIVE 준과매도/과매수
+        liq_reverse_mult *          # [v3.7 P3] 청산 역방향
         candle_momentum_mult *
         choch_penalty *
         bos_conflict_penalty *
@@ -739,6 +781,8 @@ def calculate_entry_score(analysis: dict, direction: str,
         "bb_suppressed": False, "bb_suppress_reason": None, "regime": regime,
         "regime_threshold": regime_threshold, "breakdown": breakdown,
         "mtf_penalty": mtf_penalty, "exhaustion_mult": exhaustion_mult,
+        "explosive_oversold_mult": explosive_oversold_mult,   # [v3.7 P1]
+        "liq_reverse_mult": liq_reverse_mult,                 # [v3.7 P3]
         "candle_momentum_mult": candle_momentum_mult, "choch_penalty": choch_penalty,
         "bos_conflict_penalty": bos_conflict_penalty,
         "explosive_bos_penalty": explosive_bos_penalty,
