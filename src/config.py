@@ -1,17 +1,28 @@
 """
-config.py — 전역 설정 (v3.6)
+config.py — 전역 설정 (v3.7)
 ────────────────────────────────────────────────────────────────────
-[v3.6 추가]
+[v3.7 추가]
 
-⑫ 히든 다이버전스 최소 ADX 가드 (개선안 1)
-   조건: regime in (RANGING, SQUEEZE) AND adx < HIDDEN_DIV_MIN_ADX
-   효과: 추세 없는 구간에서 히든 다이버전스 보너스 미지급
-   상수: HIDDEN_DIV_MIN_ADX = 18
+⑭ EXPLOSIVE 준과매도/과매수 역방향 패널티 (P1)
+   숏: regime==EXPLOSIVE AND rsi_1h < EXPLOSIVE_OVERSOLD_GUARD_RSI(45)
+       AND bb_pct_b < EXPLOSIVE_OVERSOLD_GUARD_BB(0.25)
+       → ×EXPLOSIVE_OVERSOLD_PENALTY(0.80)
+   롱: regime==EXPLOSIVE AND rsi_1h > EXPLOSIVE_OVERBOUGHT_GUARD_RSI(55)
+       AND bb_pct_b > EXPLOSIVE_OVERBOUGHT_GUARD_BB(0.75)
+       → ×EXPLOSIVE_OVERSOLD_PENALTY(0.80)
+   근거: EXPLOSIVE 하락에서 RSI 전TF 과매도 + BB 하단 = 반등 소진 위험
+         RSI·BB 가중치(13%)가 LS/Taker(62%)에 압도되는 구조 보정
 
-⑬ SQUEEZE 국면 캔들 보너스 감액 (개선안 3)
-   조건: regime == SQUEEZE
-   효과: 핀바/인걸핑 보너스 × 0.50 (방향 미결정 구간 신뢰도 저하)
-   상수: SQUEEZE_CANDLE_BONUS_MULT = 0.50
+⑮ 청산 역방향 소프트 패널티 (P3)
+   조건: liq.favorable_direction ≠ direction AND signal != "none"
+   적용: ×LIQ_REVERSE_PENALTY(0.92)
+   근거: 청산 감지가 진입 방향과 반대 = 단기 역풍 가능성
+         알림에는 이미 "역방향 주의" 표시되나 점수 반영 없던 문제 해결
+
+[v3.6] 히든다이버전스 ADX 가드, SQUEEZE 캔들 감액
+[v3.5] 거래량 baseline 1h 캔들 / 4
+[v3.4] EXPLOSIVE+BOS 강화 패널티, ADX 역추세 임계값, 역추세 보너스 캡, FVG 모호 차단
+[v3.3] SIGNAL_MIN_SCORE 제거, Volume 정규화, 거래량 페널티, lookback iloc[-2]
 
 [v3.5] 거래량 baseline 1h 캔들 / 4
 [v3.4] EXPLOSIVE+BOS 강화 패널티, ADX 역추세 임계값, 역추세 보너스 캡, FVG 모호 차단
@@ -273,6 +284,22 @@ ADX_BOS_COUNTER_THRESHOLD = 30
 
 # [v3.4] FVG 양방향 모호 + 저거래량 신호 차단
 FVG_AMBIGUOUS_VOL_THRESHOLD = 30.0
+
+# [v3.7 P1] EXPLOSIVE 준과매도/과매수 역방향 패널티
+# 숏: EXPLOSIVE + rsi_1h < 45 + pct_b < 0.25 → 과매도 반등 위험
+# 롱: EXPLOSIVE + rsi_1h > 55 + pct_b > 0.75 → 과매수 반락 위험
+# 근거: EXPLOSIVE 가중치에서 LS+Taker=62%, RSI+BB=13% → RSI/BB 반등 신호가 압도당하는 구조 보정
+EXPLOSIVE_OVERSOLD_GUARD_RSI   = 45    # 숏 차단: 1h RSI 이 값 미만
+EXPLOSIVE_OVERSOLD_GUARD_BB    = 0.25  # 숏 차단: BB %B 이 값 미만
+EXPLOSIVE_OVERBOUGHT_GUARD_RSI = 60    # 롱 차단: 1h RSI 이 값 초과 (55→60: 롱은 더 보수적 기준)
+EXPLOSIVE_OVERBOUGHT_GUARD_BB  = 0.75  # 롱 차단: BB %B 이 값 초과
+EXPLOSIVE_OVERSOLD_PENALTY     = 0.80  # 패널티 배율
+
+# [v3.7 P3] 청산 역방향 소프트 패널티
+# 조건: liq.favorable_direction ≠ direction (청산 감지가 진입 방향과 반대)
+# 기존: 알림에 "역방향 주의" 표시만 → 점수에 미반영
+# 수정: 소프트 패널티 체인에 추가
+LIQ_REVERSE_PENALTY = 0.92
 
 # [v3.6] 히든 다이버전스 최소 ADX (개선안 1)
 # RANGING/SQUEEZE에서 ADX < 이 값이면 히든 다이버전스 보너스 미지급
