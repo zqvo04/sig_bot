@@ -1,5 +1,5 @@
 """
-main.py — Matrix 전략 연동 버전
+main.py — Matrix 전략 연동 버전 [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
 각 Job은 단일 심볼만 처리 (GitHub Actions가 병렬화)
 """
 
