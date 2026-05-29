@@ -1,25 +1,23 @@
 """
-analysis_engine.py — 분석 엔진 (v3.5)
+analysis_engine.py — 분석 엔진 (v3.8) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
 ────────────────────────────────────────────────────────────────────
+⚠️ 이 코드는 15분봉(15m entry) 시그봇 전용입니다. 1시간봉 버전과 혼동 금지.
+   진입 판정(RSI/BB/EMA/레짐)은 모두 15분봉. 1h/4h는 MTF-RSI 참조용.
+────────────────────────────────────────────────────────────────────
+[v3.8 변경] ← 어제(2026-05-28~29) 불량신호 대응
+
+★ analyze_mtf_rsi: 눌림목 미세(plm/psm) 조건 강화
+  근거: 15분봉에서 "1h RSI < 52"는 중립 수준 → 노이즈와 구분 불가.
+        XRP 15:30(1h=49,15m=60), HYPE 16:30(1h=50,15m=58) 불량신호 원인.
+  숏 미세(psm): 1h<52,15m>58  →  1h<49,15m>60  (상위TF 하락 바이어스 명확화)
+  롱 미세(plm): 1h>48,15m<42  →  1h>51,15m<40  (대칭 강화)
+  효과: XRP 15:30 / HYPE 16:30 의 눌림목미세(+4pt) 보너스 차단.
+
 [v3.5 변경]
-
-★ check_volume_confirmation: 거래량 baseline 방식 변경
-  기존: cur_vol=15m[-2], avg_vol=15m 48개 평균 (12h)
-  수정: cur_vol=15m[-2], baseline=1h 120개 평균 / 4 (120h→15m 환산)
-  효과:
-    - 1h 합산으로 15m 단일 노이즈 제거 (~4배 안정)
-    - 120h(5일) = 평일 Mon-Fri 사이클 완전 포함
-    - 주말/세션 편향 대폭 감소
-    - 허위 15m 스파이크 baseline 오염 제거
-  폴백: df_1h 없거나 데이터 부족 시 기존 15m 로직 자동 전환
-
+★ check_volume_confirmation: 거래량 baseline = 1h 캔들 120개 평균 / 4
 ★ run_full_analysis: df_1h를 check_volume_confirmation에 전달
-  기존: check_volume_confirmation(df_15m)
-  수정: check_volume_confirmation(df_15m, df_1h=df_1h)
-
 [v3.3] Volume 스코어 정규화, iloc[-2] 기준 캔들
 [v3.2] evaluate_gates 단일 불리 패널티
-[이전] analyze_oi_change 제거, Hidden Divergence 유지
 ────────────────────────────────────────────────────────────────────
 """
 import logging
@@ -66,12 +64,6 @@ def check_volume_confirmation(df_15m, df_1h=None):
       baseline = mean(df_1h[-122:-2]) / 4  (120개 1h 완성 캔들 평균 → 15m 환산)
       cur_vol  = df_15m[-2]               (직전 완성 15m 캔들)
       ratio    = cur_vol / baseline
-
-    왜 120h(5일)?
-      - 평일(Mon-Fri) 사이클 완전 포함 → 요일별 편향 제거
-      - 주말 저거래량이 baseline보다 낮게 측정 → 페널티 정확 발동
-      - CANDLE_LIMITS["1h"]=210 → 122개 필요 → 여유 88개
-
     폴백: df_1h 없거나 부족 시 기존 15m 로직 (VOLUME_CONFIRM_LOOKBACK=48)
     """
     _empty = {"confirmed":False,"strong":False,"ratio":0.0,"score":50.0,
@@ -184,16 +176,23 @@ def analyze_mtf_rsi(df_15m, df_1h, df_4h):
     v_entry=v_15m if v_15m is not None else v_weighted
     state=("oversold" if v_entry<=config.RSI_OVERSOLD else "overbought" if v_entry>=config.RSI_OVERBOUGHT else "neutral")
     long_score_raw,short_score_raw=_rsi_to_score(v_weighted)
+
+    # ── 눌림목 롱 ───────────────────────────────────────────────
     pls=(v_1h is not None and v_1h>58 and v_15m is not None and v_15m<40)
     plw=(v_1h is not None and v_1h>52 and v_15m is not None and v_15m<44 and not pls)
-    # [B] 눌림목 미세 롱 조건 강화: 1h>48,15m<42 (구:1h>45,15m<45)
-    plm=(v_1h is not None and v_1h>48 and v_15m is not None and v_15m<42 and not pls and not plw)
+    # [v3.8] 눌림목 미세 롱 조건 강화: 1h>51,15m<40 (구:1h>48,15m<42)
+    #   15분봉에서 1h가 중립(50) 초과로 명확히 상승 바이어스일 때만 눌림목 인정
+    plm=(v_1h is not None and v_1h>51 and v_15m is not None and v_15m<40 and not pls and not plw)
     pl=pls or plw or plm
+
+    # ── 눌림목 숏 ───────────────────────────────────────────────
     pss=(v_1h is not None and v_1h<42 and v_15m is not None and v_15m>60)
     psw=(v_1h is not None and v_1h<48 and v_15m is not None and v_15m>56 and not pss)
-    # [B] 눌림목 미세 숏 조건 강화: 1h<52,15m>58 (구:1h<55,15m>55)
-    psm=(v_1h is not None and v_1h<52 and v_15m is not None and v_15m>58 and not pss and not psw)
+    # [v3.8] 눌림목 미세 숏 조건 강화: 1h<49,15m>60 (구:1h<52,15m>58)
+    #   15분봉에서 1h가 중립(50) 미만으로 명확히 하락 바이어스일 때만 눌림목 인정
+    psm=(v_1h is not None and v_1h<49 and v_15m is not None and v_15m>60 and not pss and not psw)
     ps=pss or psw or psm
+
     macro_bull=v_4h is not None and v_4h>52
     macro_bear=v_4h is not None and v_4h<48
     pla=(14 if pls else 9 if plw else 5 if plm else 0)
