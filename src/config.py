@@ -1,29 +1,28 @@
 """
-config.py — 전역 설정 (v3.7)
+config.py — 전역 설정 (v3.8) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
 ────────────────────────────────────────────────────────────────────
-[v3.7 추가]
+⚠️ 이 코드는 15분봉(15m entry) 시그봇 전용입니다. 1시간봉 버전과 혼동 금지.
+   entry=15m / mid=1h / macro=4h — 모든 진입 판정 기준은 15분봉.
+────────────────────────────────────────────────────────────────────
+[v3.8 추가] ← 어제(2026-05-28~29) 불량신호 대응 업그레이드
 
-⑭ EXPLOSIVE 준과매도/과매수 역방향 패널티 (P1)
-   숏: regime==EXPLOSIVE AND rsi_1h < EXPLOSIVE_OVERSOLD_GUARD_RSI(45)
-       AND bb_pct_b < EXPLOSIVE_OVERSOLD_GUARD_BB(0.25)
-       → ×EXPLOSIVE_OVERSOLD_PENALTY(0.80)
-   롱: regime==EXPLOSIVE AND rsi_1h > EXPLOSIVE_OVERBOUGHT_GUARD_RSI(55)
-       AND bb_pct_b > EXPLOSIVE_OVERBOUGHT_GUARD_BB(0.75)
-       → ×EXPLOSIVE_OVERSOLD_PENALTY(0.80)
-   근거: EXPLOSIVE 하락에서 RSI 전TF 과매도 + BB 하단 = 반등 소진 위험
-         RSI·BB 가중치(13%)가 LS/Taker(62%)에 압도되는 구조 보정
+㉑ LS 극단 임계값 강화 (불량신호 대응)
+   LS_LONG_EXTREME  : 0.72 → 0.75 (롱 75% 이상에서만 숏 극단 90pt)
+   LS_SHORT_EXTREME : 0.62 → 0.65 (숏 65% 이상에서만 롱 극단 90pt)
+   근거: XRP/HYPE 불량신호 5건 전부 LS 90pt가 점수 견인.
+         롱 73.5%가 90pt를 받던 임계를 상향 → 경계값 신호 차단.
 
-⑮ 청산 역방향 소프트 패널티 (P3)
-   조건: liq.favorable_direction ≠ direction AND signal != "none"
-   적용: ×LIQ_REVERSE_PENALTY(0.92)
-   근거: 청산 감지가 진입 방향과 반대 = 단기 역풍 가능성
-         알림에는 이미 "역방향 주의" 표시되나 점수 반영 없던 문제 해결
+㉒ RANGING 저ADX 임계값 동적 상향 파라미터 (scoring_system.py에서 사용)
+   RANGING_LOW_ADX_THRESHOLD = 20
+   RANGING_LOW_ADX_BOOST_CAP = 4
+   RANGING_LOW_ADX_DIVISOR   = 1.5
+   근거: 15m 레짐 분류가 ADX값 무관 동일 임계(63pt) 적용.
+         ADX 15(노이즈)와 ADX 24(약추세)를 동일 취급하던 문제 보정.
 
+㉓ FVG 역방향 패널티는 BONUS_FVG_ENTRY_CONFLICTED(4) 재사용 — 신규 상수 불필요
+
+[v3.7] EXPLOSIVE 준과매도/과매수 역방향 패널티, 청산 역방향 소프트 패널티
 [v3.6] 히든다이버전스 ADX 가드, SQUEEZE 캔들 감액
-[v3.5] 거래량 baseline 1h 캔들 / 4
-[v3.4] EXPLOSIVE+BOS 강화 패널티, ADX 역추세 임계값, 역추세 보너스 캡, FVG 모호 차단
-[v3.3] SIGNAL_MIN_SCORE 제거, Volume 정규화, 거래량 페널티, lookback iloc[-2]
-
 [v3.5] 거래량 baseline 1h 캔들 / 4
 [v3.4] EXPLOSIVE+BOS 강화 패널티, ADX 역추세 임계값, 역추세 보너스 캡, FVG 모호 차단
 [v3.3] SIGNAL_MIN_SCORE 제거, Volume 정규화, 거래량 페널티, lookback iloc[-2]
@@ -42,6 +41,7 @@ OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "")
 
+# 모니터링 대상 — 코드 기존값 그대로 유지 (사용자 지시)
 SYMBOLS: list = ["BTC/USDT", "ETH/USDT", "HYPE/USDT", "SOL/USDT", "SUI/USDT", "XRP/USDT"]
 
 TIMEFRAMES    = {"entry": "15m", "mid": "1h", "macro": "4h"}
@@ -97,9 +97,12 @@ FUNDING_LONG_MILD    = -0.0001
 FUNDING_SHORT_MILD   =  0.0005
 FUNDING_SHORT_STRONG =  0.001
 
-LS_LONG_EXTREME  = 0.72
+# [v3.8 ㉑] LS 극단 임계값 강화
+# 기존: LONG_EXTREME=0.72, SHORT_EXTREME=0.62
+# 변경: 롱 73.5%가 90pt를 받던 구조 → 75%로 상향, 숏도 대칭 상향
+LS_LONG_EXTREME  = 0.75   # (구 0.72)
 LS_LONG_HIGH     = 0.65
-LS_SHORT_EXTREME = 0.62
+LS_SHORT_EXTREME = 0.65   # (구 0.62)
 LS_SHORT_HIGH    = 0.55
 
 OI_CHANGE_STRONG = 0.05
@@ -191,7 +194,7 @@ BONUS_FAILED_BREAKOUT      = 12
 BONUS_EXTREME_OVERSOLD_MTF = 10
 
 BONUS_FVG_ENTRY            = 8
-BONUS_FVG_ENTRY_CONFLICTED = 4
+BONUS_FVG_ENTRY_CONFLICTED = 4   # [v3.8 ㉓] FVG 역방향 패널티에도 재사용 (-4pt)
 BONUS_BOS_CONFIRM          = 8
 BONUS_FIB_GOLDEN_POCKET    = 10
 BONUS_FIB_KEY_LEVEL        = 5
@@ -245,8 +248,7 @@ CANDLE_MOMENTUM_PENALTY_RANGING   = 0.80
 CANDLE_MOMENTUM_PENALTY_EXPLOSIVE  = 0.85
 CANDLE_MOMENTUM_PENALTY_TRENDING   = 0.90
 
-# [v3.6] SQUEEZE 국면 캔들 패턴 보너스 감액 배율 (개선안 3)
-# 방향 미결정 구간에서 단일 캔들 신뢰도 저하 반영
+# [v3.6] SQUEEZE 국면 캔들 패턴 보너스 감액 배율
 SQUEEZE_CANDLE_BONUS_MULT = 0.50
 
 # Gate 패널티
@@ -286,25 +288,37 @@ ADX_BOS_COUNTER_THRESHOLD = 30
 FVG_AMBIGUOUS_VOL_THRESHOLD = 30.0
 
 # [v3.7 P1] EXPLOSIVE 준과매도/과매수 역방향 패널티
-# 숏: EXPLOSIVE + rsi_1h < 45 + pct_b < 0.25 → 과매도 반등 위험
-# 롱: EXPLOSIVE + rsi_1h > 55 + pct_b > 0.75 → 과매수 반락 위험
-# 근거: EXPLOSIVE 가중치에서 LS+Taker=62%, RSI+BB=13% → RSI/BB 반등 신호가 압도당하는 구조 보정
-EXPLOSIVE_OVERSOLD_GUARD_RSI   = 45    # 숏 차단: 1h RSI 이 값 미만
-EXPLOSIVE_OVERSOLD_GUARD_BB    = 0.25  # 숏 차단: BB %B 이 값 미만
-EXPLOSIVE_OVERBOUGHT_GUARD_RSI = 60    # 롱 차단: 1h RSI 이 값 초과 (55→60: 롱은 더 보수적 기준)
-EXPLOSIVE_OVERBOUGHT_GUARD_BB  = 0.75  # 롱 차단: BB %B 이 값 초과
-EXPLOSIVE_OVERSOLD_PENALTY     = 0.80  # 패널티 배율
+EXPLOSIVE_OVERSOLD_GUARD_RSI   = 45
+EXPLOSIVE_OVERSOLD_GUARD_BB    = 0.25
+EXPLOSIVE_OVERBOUGHT_GUARD_RSI = 60
+EXPLOSIVE_OVERBOUGHT_GUARD_BB  = 0.75
+EXPLOSIVE_OVERSOLD_PENALTY     = 0.80
 
 # [v3.7 P3] 청산 역방향 소프트 패널티
-# 조건: liq.favorable_direction ≠ direction (청산 감지가 진입 방향과 반대)
-# 기존: 알림에 "역방향 주의" 표시만 → 점수에 미반영
-# 수정: 소프트 패널티 체인에 추가
 LIQ_REVERSE_PENALTY = 0.92
 
-# [v3.6] 히든 다이버전스 최소 ADX (개선안 1)
-# RANGING/SQUEEZE에서 ADX < 이 값이면 히든 다이버전스 보너스 미지급
-# 히든 다이버전스 = 추세 지속 신호 → 추세 없는 구간에서 의미 없음
+# [v3.6] 히든 다이버전스 최소 ADX
 HIDDEN_DIV_MIN_ADX = 18
+
+# ══════════════════════════════════════════════════════════════
+# [v3.8 ㉒] RANGING 저ADX 임계값 동적 상향 (15분봉 노이즈 대응)
+# ──────────────────────────────────────────────────────────────
+# 15m RANGING 레짐은 ADX값과 무관하게 동일 임계(63pt)를 적용해왔음.
+# ADX 15(노이즈성 횡보)와 ADX 24(약추세 횡보)를 동일 취급 → 보정.
+# boost = min(CAP, int((THRESHOLD - adx) / DIVISOR))
+#   ADX 18 → +1pt, ADX 16 → +2pt, ADX 14 → +4pt (최대 +4)
+RANGING_LOW_ADX_THRESHOLD = 20      # 이 값 미만일 때 임계 상향 발동
+RANGING_LOW_ADX_BOOST_CAP = 4       # 최대 부스트 pt
+RANGING_LOW_ADX_DIVISOR   = 1.5     # 부스트 강도 (작을수록 강함)
+RANGING_LOW_ADX_MAX_THRESHOLD = 67  # 부스트 후 임계 상한
+
+# ══════════════════════════════════════════════════════════════
+# [v3.8 ㉔] 거래량-가격 다이버전스 SQUEEZE 감액 배율
+# ──────────────────────────────────────────────────────────────
+# 기존: RANGING만 ×0.60, SQUEEZE는 ×1.0 (감액 없음)
+# 변경: SQUEEZE도 방향 미결정 구간 → 캔들 패턴과 동일하게 ×0.50 감액
+VPD_MULT_RANGING = 0.60
+VPD_MULT_SQUEEZE = 0.50
 
 # ══════════════════════════════════════════════════════════════
 # SMC / 피보나치
