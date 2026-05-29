@@ -1,5 +1,5 @@
 """
-data_pipeline.py — OKX 선물 데이터 수집 파이프라인
+data_pipeline.py — OKX 선물 데이터 수집 파이프라인 [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
 ──────────────────────────────────────────────────────────────────────
 핵심 원칙: OKX 전용 엔드포인트는 CCXT를 거치지 않고 _okx_get() 직접 호출.
 CCXT는 fetch_ohlcv / fetch_ticker / fetch_funding_rate 등 표준 메서드만 사용.
