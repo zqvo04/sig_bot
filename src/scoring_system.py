@@ -1,31 +1,45 @@
 """
-scoring_system.py — 점수 산출 (v3.7)
+scoring_system.py — 점수 산출 (v3.8) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
 ────────────────────────────────────────────────────────────────────
-[v3.7 추가]
+⚠️ 이 코드는 15분봉(15m entry) 시그봇 전용입니다. 1시간봉 버전과 혼동 금지.
+   모든 진입 점수 산출은 15분봉 기준. 1h/4h는 MTF-RSI 페널티 참조용.
+────────────────────────────────────────────────────────────────────
+[v3.8 추가] ← 어제(2026-05-28~29) 불량신호 8건 대응 업그레이드
 
-⑲ EXPLOSIVE 준과매도/과매수 역방향 패널티 (P1)
-   숏: regime==EXPLOSIVE AND rsi_1h<45 AND pct_b<0.25 → ×0.80
-   롱: regime==EXPLOSIVE AND rsi_1h>55 AND pct_b>0.75 → ×0.80
-   위치: soft_penalty 체인 (exhaustion_mult 직후)
-   근거: EXPLOSIVE 가중치 LS+Taker=62% 구조에서 RSI/BB 반등 신호 압도 보정
+㉕ 돌파실패/붕괴실패 보너스 RANGING/SQUEEZE 반감 (⑧ 섹션)
+   근거: 15m 20캔들=5시간. 박스권 내 등락이면 failed_breakout 노이즈 반복.
+         LowerHigh/HigherLow는 이미 RANGING/SQUEEZE 차단했으나
+         failed_breakout/failed_breakdown만 예외였던 비일관성 보정.
+   효과: HYPE 14:45(돌파실패 +12→+6), HYPE 03:30·05:00(붕괴실패 +12→+6)
 
-⑳ 청산 역방향 소프트 패널티 (P3)
-   조건: liq.favorable_direction ≠ direction
-   적용: ×0.92, soft_penalty 체인 편입
-   위치: explosive_oversold_mult 직후
+㉖ FVG 역방향 패널티 신설 (⑨ 섹션)
+   근거: bear_fvg + d=long (약세FVG 내 롱), bull_fvg + d=short 조건에
+         아무 처리가 없어 기관 저항/지지 구간 진입에 패널티 부재.
+   적용: 역방향 단독 FVG → -BONUS_FVG_ENTRY_CONFLICTED(-4pt) 보너스
+   효과: HYPE LONG 03:30(약세FVG 내 롱) -4pt
 
+㉗ 거래량-가격 다이버전스 SQUEEZE 감액 (⑦ 섹션)
+   근거: 캔들 패턴은 SQUEEZE ×0.50 감액되나 거래량다이버전스는 예외였음.
+         SQUEEZE=방향 미결정 → 동일 기준 적용.
+   적용: VPD_MULT_SQUEEZE(0.50)
+   효과: HYPE LONG 03:30(거래량강세다이버전스 +10→+5) -5pt
+
+㉘ RANGING 저ADX 임계값 동적 상향 (signal 판정 직전)
+   근거: 15m RANGING이 ADX값 무관 동일 임계(63pt). ADX 15(노이즈)와
+         ADX 24(약추세)를 동일 취급.
+   적용: ADX<20 시 boost = min(4, int((20-adx)/1.5)) → 임계 상향
+   효과: XRP 15:30(ADX15 → 임계63+3=66), HYPE 05:00(ADX16 → 65)
+
+㉙ SQUEEZE 거래량폭발 EMA 방향 근거 요구 (⑭ 섹션)
+   근거: SQUEEZE=방향 미결정. EMA 전방향 역방향(ema_same=0)인데
+         거래량폭발 보너스 지급은 방향 근거 없음.
+   적용: SQUEEZE + ema_same==0 → 거래량폭발 미지급
+
+[v3.7] EXPLOSIVE 준과매도/과매수 역방향 패널티(P1), 청산 역방향 소프트 패널티(P3)
 [v3.6] 히든다이버전스 ADX 가드, HL/LH 구조 RANGING 차단, SQUEEZE 캔들 감액
-
-[v3.4 추가]
-⑦ EXPLOSIVE + BOS 역방향 강화 패널티
-⑧ ADX 연동 역추세 임계값 조정
-⑨ 역추세 보너스 캡 분리
-⑩ FVG 양방향 모호 + 저거래량 신호 차단
-[v3.4 버그 수정] bos_conflict_penalty 사전 계산 순서 재배치
-[v3.3] base_score 유령계산 제거, SIGNAL_MIN_SCORE 제거, 거래량 패널티, lookback 개선
+[v3.4] EXPLOSIVE+BOS 강화 패널티, ADX 역추세 임계값, 역추세 보너스 캡, FVG 모호 차단
+[v3.3] base_score 유령계산 제거, SIGNAL_MIN_SCORE 제거, 거래량 패널티
 [v3.2] BOS_CONFLICT_PENALTY ×0.82
-[v3.1] OI 제거
-[v3]   ADX 배율 제거, EMA 배율 통합
 ────────────────────────────────────────────────────────────────────
 """
 import json, logging, os
@@ -203,9 +217,6 @@ def calculate_entry_score(analysis: dict, direction: str,
         logger.info(f"[EXPLOSIVE소진/{d.upper()}] {exhaustion_reason}")
 
     # ── [v3.7 P1] EXPLOSIVE 준과매도/과매수 역방향 패널티 ────────
-    # EXPLOSIVE 가중치: LS(24%)+Taker(38%)=62%, RSI(7%)+BB(6%)=13%
-    # → RSI/BB가 반등/반락을 가리켜도 LS 극단값이 구조적으로 압도
-    # → 진입 타이밍이 과매도/과매수 소진 구간일 때 추가 보정
     explosive_oversold_mult = 1.0
     if regime_name == "EXPLOSIVE":
         _pct_b_p1 = bb.get("pct_b", 0.5)
@@ -231,8 +242,6 @@ def calculate_entry_score(analysis: dict, direction: str,
             )
 
     # ── [v3.7 P3] 청산 역방향 소프트 패널티 ─────────────────────
-    # 청산 감지 방향이 진입 방향과 반대 = 단기 역풍 가능성
-    # 기존: 알림에 "역방향 주의" 표시만, 점수 미반영 → 이번에 수치화
     liq_reverse_mult = 1.0
     _liq_fav = liq.get("favorable_direction")
     if (_liq_fav is not None and
@@ -277,7 +286,7 @@ def calculate_entry_score(analysis: dict, direction: str,
         }
 
     # ══════════════════════════════════════════════════════════════
-    # [v3.4 순서 수정] CHoCH / BOS 패널티 사전 계산
+    # CHoCH / BOS 패널티 사전 계산
     # ══════════════════════════════════════════════════════════════
     bos_choch_data = analysis.get("bos_choch", {})
 
@@ -388,25 +397,38 @@ def calculate_entry_score(analysis: dict, direction: str,
         logger.info(f"[눌림목미세] +{config.BONUS_PULLBACK_ENTRY_MICRO}pt [{d.upper()}]")
 
     # ⑦ 거래량-가격 다이버전스
+    # [v3.8 ㉗] SQUEEZE 감액 추가 (기존: RANGING ×0.60만)
     vpd = analysis.get("vol_price_div", {})
-    _vpd_mult = 0.60 if regime_name == "RANGING" else 1.0
+    if regime_name == "RANGING":
+        _vpd_mult = config.VPD_MULT_RANGING       # 0.60
+    elif regime_name == "SQUEEZE":
+        _vpd_mult = config.VPD_MULT_SQUEEZE        # 0.50 [v3.8 신규]
+    else:
+        _vpd_mult = 1.0
     if d == "short" and vpd.get("bearish_vol_div"):
         _vpd_val = round(config.BONUS_VOL_PRICE_DIV * _vpd_mult)
         bonuses.append(("거래량약세다이버전스", _vpd_val))
         if _vpd_mult < 1.0:
-            logger.info(f"[거래량Div/RANGING] +{config.BONUS_VOL_PRICE_DIV}→+{_vpd_val}pt (40% 감액)")
+            logger.info(f"[거래량Div/{regime_name}] +{config.BONUS_VOL_PRICE_DIV}→+{_vpd_val}pt (×{_vpd_mult})")
     elif d == "long" and vpd.get("bullish_vol_div"):
         _vpd_val = round(config.BONUS_VOL_PRICE_DIV * _vpd_mult)
         bonuses.append(("거래량강세다이버전스", _vpd_val))
         if _vpd_mult < 1.0:
-            logger.info(f"[거래량Div/RANGING] +{config.BONUS_VOL_PRICE_DIV}→+{_vpd_val}pt (40% 감액)")
+            logger.info(f"[거래량Div/{regime_name}] +{config.BONUS_VOL_PRICE_DIV}→+{_vpd_val}pt (×{_vpd_mult})")
 
-    # ⑧ 돌파/붕괴 실패 + [v3.6 개선안 2] HigherLow/LowerHigh RANGING/SQUEEZE 차단
+    # ⑧ 돌파/붕괴 실패 + 구조 보너스
+    # [v3.8 ㉕] failed_breakout/failed_breakdown 도 RANGING/SQUEEZE 반감
+    #   (기존: LowerHigh/HigherLow만 차단, 돌파실패류는 예외였음)
     ms = analysis.get("market_structure", {})
     _struct_eligible = regime_name not in ("RANGING", "SQUEEZE")
+    _fb_half = config.BONUS_FAILED_BREAKOUT // 2   # 6pt
     if d == "short":
         if ms.get("failed_breakout"):
-            bonuses.append(("돌파실패", config.BONUS_FAILED_BREAKOUT))
+            if _struct_eligible:
+                bonuses.append(("돌파실패", config.BONUS_FAILED_BREAKOUT))
+            else:
+                bonuses.append(("돌파실패(박스권반감)", _fb_half))
+                logger.info(f"[구조보너스/{d.upper()}] {regime_name} → 돌파실패 반감 +{_fb_half}pt (박스권 노이즈)")
         if ms.get("lower_high"):
             if _struct_eligible:
                 bonuses.append(("LowerHigh구조", config.BONUS_MARKET_STRUCT_TREND))
@@ -417,7 +439,11 @@ def calculate_entry_score(analysis: dict, direction: str,
                 )
     elif d == "long":
         if ms.get("failed_breakdown"):
-            bonuses.append(("붕괴실패", config.BONUS_FAILED_BREAKOUT))
+            if _struct_eligible:
+                bonuses.append(("붕괴실패", config.BONUS_FAILED_BREAKOUT))
+            else:
+                bonuses.append(("붕괴실패(박스권반감)", _fb_half))
+                logger.info(f"[구조보너스/{d.upper()}] {regime_name} → 붕괴실패 반감 +{_fb_half}pt (박스권 노이즈)")
         if ms.get("higher_low"):
             if _struct_eligible:
                 bonuses.append(("HigherLow구조", config.BONUS_MARKET_STRUCT_TREND))
@@ -428,6 +454,8 @@ def calculate_entry_score(analysis: dict, direction: str,
                 )
 
     # ⑨ FVG
+    # [v3.8 ㉖] 역방향 단독 FVG 패널티 신설
+    #   약세FVG 내 롱 / 강세FVG 내 숏 = 기관 저항/지지 구간 진입 → -4pt
     fvg      = analysis.get("fvg", {})
     bull_fvg = fvg.get("in_bullish_fvg", False)
     bear_fvg = fvg.get("in_bearish_fvg", False)
@@ -442,6 +470,14 @@ def calculate_entry_score(analysis: dict, direction: str,
     elif d == "short" and bear_fvg:
         bonuses.append(("FVG약세진입", fvg_val))
         logger.info(f"[FVG] ★ 숏 FVG +{fvg_val}pt")
+    elif d == "long"  and bear_fvg and not bull_fvg:
+        # [v3.8] 약세 FVG 내부 롱 = 기관 매도 저항 구간 진입
+        bonuses.append(("FVG역방향저항(롱)", -config.BONUS_FVG_ENTRY_CONFLICTED))
+        logger.info(f"[FVG역방향/{d.upper()}] ⚠️ 약세FVG 내 롱 → 저항 구간 -{config.BONUS_FVG_ENTRY_CONFLICTED}pt")
+    elif d == "short" and bull_fvg and not bear_fvg:
+        # [v3.8] 강세 FVG 내부 숏 = 기관 매수 지지 구간 진입
+        bonuses.append(("FVG역방향지지(숏)", -config.BONUS_FVG_ENTRY_CONFLICTED))
+        logger.info(f"[FVG역방향/{d.upper()}] ⚠️ 강세FVG 내 숏 → 지지 구간 -{config.BONUS_FVG_ENTRY_CONFLICTED}pt")
 
     # ⑩ BOS 확증 (방향 일치 시만 보너스)
     if d == "long"  and bos_choch_data.get("bos_bullish"):
@@ -466,10 +502,9 @@ def calculate_entry_score(analysis: dict, direction: str,
         elif fibonacci.get("near_key_level_short"):
             bonuses.append(("피보주요레벨숏", config.BONUS_FIB_KEY_LEVEL))
 
-    # ⑫ 히든 다이버전스 [v3.6 개선안 1] ADX 가드 추가
+    # ⑫ 히든 다이버전스 [v3.6] ADX 가드
     hidden_bull = rsi.get("hidden_bull_div", False)
     hidden_bear = rsi.get("hidden_bear_div", False)
-    # RANGING/SQUEEZE + ADX < HIDDEN_DIV_MIN_ADX: 추세 없는 구간 → 추세지속 보너스 차단
     _hidden_adx = adx_15m.get("adx", 0.0)
     _hidden_div_eligible = not (
         regime_name in ("RANGING", "SQUEEZE") and _hidden_adx < config.HIDDEN_DIV_MIN_ADX
@@ -503,10 +538,17 @@ def calculate_entry_score(analysis: dict, direction: str,
         elif candle.get("bullish_engulf"): bonuses.append(("불리시인걸핑",   config.BONUS_CANDLE_ENGULFING))
 
     # ⑭ 거래량 폭발
+    # [v3.8 ㉙] SQUEEZE + EMA 전방향 역방향(ema_same=0) → 방향 근거 없음 → 미지급
     vol_ratio = vol.get("ratio", 1.0)
     adx_val   = adx_15m.get("adx", 0.0)
     if vol_ratio >= config.VOLUME_EXPLOSION_MULTIPLIER and adx_val >= 22.0 and ema_same < 3:
-        bonuses.append(("거래량폭발", config.BONUS_VOLUME_EXPLOSION))
+        if regime_name == "SQUEEZE" and ema_same == 0:
+            logger.info(
+                f"[거래량폭발/{d.upper()}] SQUEEZE+EMA0정렬 → 미지급 "
+                f"(방향 근거 없음, ratio:{vol_ratio:.2f}x)"
+            )
+        else:
+            bonuses.append(("거래량폭발", config.BONUS_VOLUME_EXPLOSION))
 
     # ⑮ Post-Squeeze 모멘텀
     prev_regime   = analysis.get("prev_regime", "")
@@ -542,9 +584,7 @@ def calculate_entry_score(analysis: dict, direction: str,
     if _taker_against:
         bonuses = [(n, round(v*0.40) if n in _CANDLE else v) for n,v in bonuses]
 
-    # ── [v3.6 개선안 3] SQUEEZE 국면 캔들 보너스 감액 ────────────
-    # 방향 미결정 구간에서 단일 캔들 패턴의 방향 신뢰도 저하
-    # Post-Squeeze 돌파 보너스는 별도 적용되므로 중복 억제 허용
+    # ── [v3.6] SQUEEZE 국면 캔들 보너스 감액 ────────────
     if regime_name == "SQUEEZE":
         _sq_candle_affected = [(n, v) for n, v in bonuses if n in _CANDLE]
         if _sq_candle_affected:
@@ -559,9 +599,11 @@ def calculate_entry_score(analysis: dict, direction: str,
             )
 
     # ── 저유동성 구조 패턴 보너스 억제 ──────────────────────────
+    # [v3.8] 박스권반감 명칭도 억제 대상에 포함
     _LOW_VOL_STRUCT = {
         "LowerHigh구조", "HigherLow구조",
         "돌파실패",       "붕괴실패",
+        "돌파실패(박스권반감)", "붕괴실패(박스권반감)",
         "거래량강세다이버전스", "거래량약세다이버전스",
         "볼린저극단+RSI다이버전스",
     }
@@ -583,7 +625,12 @@ def calculate_entry_score(analysis: dict, direction: str,
             )
 
     # ── [v3.4] 역추세 보너스 캡 / 티어드 캡 ─────────────────────
-    bonus_raw = sum(v for _, v in bonuses)
+    # [v3.8] 음수 보너스(FVG역방향)는 캡 영향 없이 그대로 합산되도록
+    #         양수 보너스에만 캡 적용 후 음수 합산
+    _pos_bonus = [(n, v) for n, v in bonuses if v > 0]
+    _neg_bonus = [(n, v) for n, v in bonuses if v <= 0]
+    bonus_raw_pos = sum(v for _, v in _pos_bonus)
+    bonus_neg_sum = sum(v for _, v in _neg_bonus)
 
     apply_counter_cap = (
         bos_conflict_penalty < 1.0 and
@@ -592,29 +639,29 @@ def calculate_entry_score(analysis: dict, direction: str,
     )
     if apply_counter_cap:
         bonus_cap   = config.COUNTER_TREND_BONUS_CAP
-        bonus_total = min(bonus_cap, bonus_raw)
-        if bonus_raw > bonus_cap:
+        bonus_total = min(bonus_cap, bonus_raw_pos) + bonus_neg_sum
+        if bonus_raw_pos > bonus_cap:
             logger.info(
                 f"[역추세보너스캡/{d.upper()}] "
-                f"BOS역방향+EMA3역방향 → 보너스 {bonus_raw}→{bonus_total}pt "
-                f"(캡:{bonus_cap}pt)"
+                f"BOS역방향+EMA3역방향 → 양수보너스 {bonus_raw_pos}→{min(bonus_cap,bonus_raw_pos)}pt "
+                f"(캡:{bonus_cap}pt) + 음수{bonus_neg_sum}pt = {bonus_total}pt"
             )
     elif bos_conflict_penalty < 1.0:
         bonus_cap   = config.BOS_ONLY_BONUS_CAP
-        bonus_total = min(bonus_cap, bonus_raw)
-        if bonus_raw > bonus_cap:
+        bonus_total = min(bonus_cap, bonus_raw_pos) + bonus_neg_sum
+        if bonus_raw_pos > bonus_cap:
             logger.info(
                 f"[BOS역방향캡/{d.upper()}] "
-                f"BOS역방향 단독 → 보너스 {bonus_raw}→{bonus_total}pt "
-                f"(캡:{bonus_cap}pt)"
+                f"BOS역방향 단독 → 양수보너스 {bonus_raw_pos}→{min(bonus_cap,bonus_raw_pos)}pt "
+                f"(캡:{bonus_cap}pt) + 음수{bonus_neg_sum}pt = {bonus_total}pt"
             )
     else:
         bonus_cap   = _get_tiered_bonus_cap(base_score)
-        bonus_total = min(bonus_cap, bonus_raw)
-        if bonus_raw > bonus_cap:
+        bonus_total = min(bonus_cap, bonus_raw_pos) + bonus_neg_sum
+        if bonus_raw_pos > bonus_cap:
             logger.info(
                 f"[보너스캡] base:{base_score:.0f}pt → 캡:{bonus_cap}pt "
-                f"({bonus_raw}→{bonus_total}pt)"
+                f"(양수{bonus_raw_pos}→{min(bonus_cap,bonus_raw_pos)}pt) + 음수{bonus_neg_sum}pt = {bonus_total}pt"
             )
 
     # ── 캔들 모멘텀 역방향 패널티 ───────────────────────────────
@@ -677,8 +724,8 @@ def calculate_entry_score(analysis: dict, direction: str,
     soft_penalty = (
         mtf_penalty *
         exhaustion_mult *
-        explosive_oversold_mult *   # [v3.7 P1] EXPLOSIVE 준과매도/과매수
-        liq_reverse_mult *          # [v3.7 P3] 청산 역방향
+        explosive_oversold_mult *   # [v3.7 P1]
+        liq_reverse_mult *          # [v3.7 P3]
         candle_momentum_mult *
         choch_penalty *
         bos_conflict_penalty *
@@ -693,7 +740,7 @@ def calculate_entry_score(analysis: dict, direction: str,
         )), 2
     )
 
-    # ── [v3.4] ADX 연동 역추세 임계값 조정 ──────────────────────
+    # ── 임계값 결정 ──────────────────────────────────────────────
     regime_threshold = regime.get("threshold", config.REGIME_THRESHOLDS.get("TRENDING", 63))
 
     # ── [v3.5 개선③] BB 스퀴즈 감지 시 임계값 +2pt 상향 ─────────
@@ -703,6 +750,27 @@ def calculate_entry_score(analysis: dict, direction: str,
             f"[BB스퀴즈임계/{d.upper()}] BB 스퀴즈 감지 → 임계값 +2pt = {regime_threshold}pt"
         )
 
+    # ── [v3.8 ㉘] RANGING 저ADX 임계값 동적 상향 ────────────────
+    #   15m RANGING에서 ADX가 낮을수록(노이즈) 임계 강화
+    if regime_name == "RANGING":
+        _adx_ranging = adx_15m.get("adx", 25.0)
+        if _adx_ranging < config.RANGING_LOW_ADX_THRESHOLD:
+            _ranging_adx_boost = min(
+                config.RANGING_LOW_ADX_BOOST_CAP,
+                int((config.RANGING_LOW_ADX_THRESHOLD - _adx_ranging) / config.RANGING_LOW_ADX_DIVISOR)
+            )
+            if _ranging_adx_boost > 0:
+                regime_threshold = min(
+                    config.RANGING_LOW_ADX_MAX_THRESHOLD,
+                    regime_threshold + _ranging_adx_boost
+                )
+                logger.info(
+                    f"[저ADX/RANGING/{d.upper()}] "
+                    f"ADX:{_adx_ranging:.0f}<{config.RANGING_LOW_ADX_THRESHOLD} "
+                    f"→ 임계 +{_ranging_adx_boost}pt = {regime_threshold}pt"
+                )
+
+    # ── [v3.4] ADX 연동 역추세 임계값 조정 ──────────────────────
     if ema_all_reverse and not bb_reversal_exempt:
         adx_val_ct = adx_15m.get("adx", 0.0)
         if   adx_val_ct >= config.ADX_COUNTER_TREND_THRESHOLD_STRONG:
@@ -747,6 +815,8 @@ def calculate_entry_score(analysis: dict, direction: str,
             f" → (base:{base_score:.1f}+보너스{bonus_total}[cap:{bonus_cap}])"
             + (f" ×MTF{mtf_penalty:.2f}"                  if mtf_penalty < 1.0               else "")
             + (f" ×소진{exhaustion_mult:.2f}"              if exhaustion_mult < 1.0           else "")
+            + (f" ×EXP과매도{explosive_oversold_mult:.2f}" if explosive_oversold_mult < 1.0   else "")
+            + (f" ×청산역{liq_reverse_mult:.2f}"           if liq_reverse_mult < 1.0          else "")
             + (f" ×캔들{candle_momentum_mult:.2f}"         if candle_momentum_mult < 1.0      else "")
             + (f" ×CHoCH{choch_penalty:.2f}"               if choch_penalty < 1.0             else "")
             + (f" ×BOS충돌{bos_conflict_penalty:.2f}"      if bos_conflict_penalty < 1.0      else "")
@@ -816,7 +886,7 @@ def _build_breakdown(d, scores, weights, raw, ema_m, pen,
     if bonuses:
         lines.append(f"  보너스 (상한:{bonus_cap}pt):")
         for name, val in bonuses:
-            lines.append(f"    + {name}: +{val}pt")
+            lines.append(f"    {'+' if val >= 0 else ''}{name}: {val:+d}pt")
     if micro_penalty  != 0: lines.append(f"  마이크로구조 패널티       {micro_penalty:+d}pt")
     if volume_penalty != 0: lines.append(f"  거래량 페널티             {volume_penalty:+d}pt")
     lines.append(f"  {'─'*46}")
