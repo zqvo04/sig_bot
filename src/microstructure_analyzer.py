@@ -1,5 +1,5 @@
 """
-microstructure_analyzer.py  (v3.3)
+microstructure_analyzer.py  (v3.3) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
 ──────────────────────────────────────────────────────────────────────────────
 [v3.3 변경]
 
