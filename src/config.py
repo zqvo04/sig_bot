@@ -1,33 +1,51 @@
 """
-config.py — 전역 설정 (v3.8) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
+config.py — 전역 설정 (v4.0) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
 ────────────────────────────────────────────────────────────────────
 ⚠️ 이 코드는 15분봉(15m entry) 시그봇 전용입니다. 1시간봉 버전과 혼동 금지.
    entry=15m / mid=1h / macro=4h — 모든 진입 판정 기준은 15분봉.
 ────────────────────────────────────────────────────────────────────
-[v3.8 추가] ← 어제(2026-05-28~29) 불량신호 대응 업그레이드
+[v4.0 추가] ← 과적합 방지 전면 개선 (양방향 설계 강화)
 
-㉑ LS 극단 임계값 강화 (불량신호 대응)
-   LS_LONG_EXTREME  : 0.72 → 0.75 (롱 75% 이상에서만 숏 극단 90pt)
-   LS_SHORT_EXTREME : 0.62 → 0.65 (숏 65% 이상에서만 롱 극단 90pt)
-   근거: XRP/HYPE 불량신호 5건 전부 LS 90pt가 점수 견인.
-         롱 73.5%가 90pt를 받던 임계를 상향 → 경계값 신호 차단.
+P1. 근거필터 반전형 항목 확장 + 레짐별 최소 기준 분기
+    ⑥ 멀티TF극단과매도/수, ⑦ 대규모청산꼬리, ⑧ BB극단+RSI다이버전스 추가
+    SQUEEZE: 최소 1개, RANGING: 최소 2개, 기타: 최소 2개
+    SIGNAL_MIN_EVIDENCE_RANGING = 2
+    SIGNAL_MIN_EVIDENCE_SQUEEZE = 1
+    SIGNAL_MIN_EVIDENCE_DEFAULT = 2
 
-㉒ RANGING 저ADX 임계값 동적 상향 파라미터 (scoring_system.py에서 사용)
-   RANGING_LOW_ADX_THRESHOLD = 20
-   RANGING_LOW_ADX_BOOST_CAP = 4
-   RANGING_LOW_ADX_DIVISOR   = 1.5
-   근거: 15m 레짐 분류가 ADX값 무관 동일 임계(63pt) 적용.
-         ADX 15(노이즈)와 ADX 24(약추세)를 동일 취급하던 문제 보정.
+P2. ㉛ 필터 bos_same → bos_any 완화
+    역방향 BOS라도 구조 확인 상태 → BOS패널티(×0.82)로 소프트 처리
+    BOS 자체가 없는 구조 미확인 상태만 차단
 
-㉓ FVG 역방향 패널티는 BONUS_FVG_ENTRY_CONFLICTED(4) 재사용 — 신규 상수 불필요
+P3. RANGING 임계 동적 상향 합산 상한 설정
+    RANGING_THRESHOLD_DYNAMIC_CAP = 8  (최대 63+8=71pt)
+    BB스퀴즈(+2)+저ADX(+4)+EMA역방향(+3) 중첩 합산 상한
+    ADX역추세(EMA3역방향)는 별도 블록 — 독립 적용
 
+P4. 거래량폭발 조건 재설계: ema_same < 3 → ema_same >= 1
+    방향 근거 전무(ema_same=0) 시 미지급, 완전정렬(ema_same=3)도 허용
+
+P5. ranging_bos_weak_penalty 통합: BOS_CONFLICT_PENALTY_RANGING 단일화
+    기존 0.82×0.90 이중 패널티 → RANGING 전용값 0.76으로 통합
+    soft_penalty FLOOR 제거 (이중 패널티 원인 해소)
+    BOS_CONFLICT_PENALTY_RANGING = 0.76
+
+P6. TRENDING/EXPLOSIVE LS 가중치 상한 0.18, Taker 상향
+    TRENDING:  LS 0.22→0.18, Taker 0.34→0.38
+    EXPLOSIVE: LS 0.24→0.18, Taker 0.38→0.44
+
+P7. 보너스 단일 감산 원칙: 중첩 시 가장 강한 감산 1개만 적용
+    BONUS_REDUCTION_SINGLE = True  (플래그, scoring_system에서 처리)
+
+[v3.9] RANGING LS 가중치 삭감, BOS필터, EMA역방향 임계+3, soft_floor, 근거필터
+[v3.8] LS 극단 임계값 강화, FVG 역방향 패널티, VPD SQUEEZE 감액,
+       RANGING 저ADX 임계 상향, SQUEEZE 거래량폭발 EMA 조건, 눌림목 미세 강화
 [v3.7] EXPLOSIVE 준과매도/과매수 역방향 패널티, 청산 역방향 소프트 패널티
 [v3.6] 히든다이버전스 ADX 가드, SQUEEZE 캔들 감액
-[v3.5] 거래량 baseline 1h 캔들 / 4
-[v3.4] EXPLOSIVE+BOS 강화 패널티, ADX 역추세 임계값, 역추세 보너스 캡, FVG 모호 차단
-[v3.3] SIGNAL_MIN_SCORE 제거, Volume 정규화, 거래량 페널티, lookback iloc[-2]
+[v3.5] 거래량 baseline 1h / 4
+[v3.4] EXPLOSIVE+BOS 강화 패널티, ADX 역추세, FVG 모호 차단
+[v3.3] Volume 정규화, 거래량 페널티
 [v3.2] BOS_CONFLICT_PENALTY = 0.82
-[v3.1] OI 완전 제거
 [v3]   ADX 배율 통합, EMA 배율 정비
 """
 import os
@@ -133,30 +151,33 @@ SCORE_WEIGHTS = {
     "volume":           0.04,
 }
 
+# [v3.9 ㉚] RANGING LS 가중치 삭감: 0.12→0.07, 삭감분 RSI·BB·Taker 분산
 SCORE_WEIGHTS_RANGING = {
-    "rsi":              0.32,
-    "bollinger":        0.26,
+    "rsi":              0.34,   # 0.32→0.34
+    "bollinger":        0.28,   # 0.26→0.28
     "funding_rate":     0.13,
-    "long_short_ratio": 0.12,
-    "taker_volume":     0.10,
+    "long_short_ratio": 0.07,   # 0.12→0.07 ★
+    "taker_volume":     0.11,   # 0.10→0.11
     "volume":           0.07,
 }
 
+# [v4.0 P6] LS 0.22→0.18, Taker 0.34→0.38 (방향 근거 직접성: Taker>LS)
 SCORE_WEIGHTS_TRENDING = {
     "rsi":              0.11,
     "bollinger":        0.09,
     "funding_rate":     0.15,
-    "long_short_ratio": 0.22,
-    "taker_volume":     0.34,
+    "long_short_ratio": 0.18,   # 0.22→0.18
+    "taker_volume":     0.38,   # 0.34→0.38
     "volume":           0.09,
 }
 
+# [v4.0 P6] LS 0.24→0.18, Taker 0.38→0.44 (EXPLOSIVE: Taker가 핵심 방향 근거)
 SCORE_WEIGHTS_EXPLOSIVE = {
     "rsi":              0.07,
     "bollinger":        0.06,
     "funding_rate":     0.15,
-    "long_short_ratio": 0.24,
-    "taker_volume":     0.38,
+    "long_short_ratio": 0.18,   # 0.24→0.18
+    "taker_volume":     0.44,   # 0.38→0.44
     "volume":           0.10,
 }
 
@@ -319,6 +340,37 @@ RANGING_LOW_ADX_MAX_THRESHOLD = 67  # 부스트 후 임계 상한
 # 변경: SQUEEZE도 방향 미결정 구간 → 캔들 패턴과 동일하게 ×0.50 감액
 VPD_MULT_RANGING = 0.60
 VPD_MULT_SQUEEZE = 0.50
+
+# ══════════════════════════════════════════════════════════════
+# [v4.0] 개선 파라미터 (과적합 방지)
+# ══════════════════════════════════════════════════════════════
+
+# P1. 유효 근거 최소 기준 — 레짐별 분기
+# 항목: EMA≥2TF / BOS방향 / 히든Div / FVG일치 / 피보황금포켓
+#       / 멀티TF극단과매도수 / 대규모청산꼬리 / BB극단+RSI다이버전스 (v4.0 확장)
+SIGNAL_MIN_EVIDENCE_RANGING  = 2    # RANGING: 추세·반전 모두 2개
+SIGNAL_MIN_EVIDENCE_SQUEEZE  = 1    # SQUEEZE: 방향 불확실 → 1개로 완화
+SIGNAL_MIN_EVIDENCE_DEFAULT  = 2    # TRENDING/EXPLOSIVE/UNKNOWN
+
+# P2. ㉛ BOS 필터 — bos_any 방식 (구조 확인만 요구)
+RANGING_NO_BOS_EMA_REVERSE_MIN = 2  # EMA역방향 ≥ 이 TF 수 + BOS 자체 없음 → 차단
+
+# P3. RANGING 임계 동적 상향 합산 상한
+# BB스퀴즈+저ADX+EMA역방향 합산 최대 +8pt → 임계 최대 71pt
+# ADX역추세(EMA3전방향)는 독립 블록 — 이 캡 미적용
+RANGING_EMA_REVERSE_THRESHOLD_BOOST = 3   # EMA역방향≥2TF 시 +3pt
+RANGING_THRESHOLD_DYNAMIC_CAP = 8         # BB스퀴즈+저ADX+EMA역방향 합산 상한
+
+# P4. 거래량폭발 최소 EMA 일치 요구
+VOLUME_EXPLOSION_MIN_EMA_SAME = 1   # ema_same >= 1 필요 (0이면 미지급)
+
+# P5. RANGING BOS역방향 패널티 통합값
+# 기존: BOS_CONFLICT_PENALTY(0.82) × ranging_bos_weak(0.90) = 0.738 이중 적용
+# 개선: RANGING 전용 단일값 0.76 (0.82와 0.738 사이)
+BOS_CONFLICT_PENALTY_RANGING = 0.76   # RANGING에서 BOS역방향 통합 단일 패널티
+
+# P7. 보너스 단일 감산 원칙 플래그
+BONUS_REDUCTION_SINGLE = True   # True: 중첩 감산 시 가장 강한 1개만 적용
 
 # ══════════════════════════════════════════════════════════════
 # SMC / 피보나치
