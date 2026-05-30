@@ -1,279 +1,341 @@
-# 무빙워칭 (Moving Watching)
+# 무빙워칭 (Moving Watching) — 15분봉 트레이딩 시그널 봇 v4.0
 
-OKX 선물 시장 대상 암호화폐 트레이딩 시그널 봇. GitHub Actions 기반 주기 실행, Telegram 알림 출력.
-
-**버전**: v3.3 | **대상**: BTC/USDT, ETH/USDT, HYPE/USDT, SOL/USDT, SUI/USDT | **타임프레임**: 15분봉
-
----
-
-## 아키텍처
-
-```
-GitHub Actions (Matrix Job)
-    │
-    ├── data_pipeline.py      OKX API 데이터 수집
-    ├── analysis_engine.py    기술 지표 분석 + 국면 분류
-    ├── microstructure_analyzer.py  마이크로구조 분석 (6개 방안)
-    ├── scoring_system.py     멀티레이어 점수 산출
-    ├── notification.py       Telegram 알림 빌더
-    └── main.py               단일 심볼 진입점 (Matrix 병렬화)
-```
-
-각 심볼은 독립 Job으로 병렬 실행되며 `/tmp/bot_state/`에 쿨다운 상태를 공유합니다.
+> **⚠️ 이 문서는 15분봉(15m entry) 시그봇 전용입니다. 1시간봉 버전과 혼동 금지.**  
+> entry = 15m / mid = 1h / macro = 4h — 모든 진입 판정 기준은 15분봉
 
 ---
 
-## 점수 산출 파이프라인
+## 개요
 
-```
-raw_score = Σ(지표점수 × 가중치)          [국면별 가중치]
-base_score = raw_score × ema_mult × gate_penalty
-bonus_total = min(bonus_cap, Σ보너스)
-final_score = (base_score + bonus_total) × soft_penalty + micro_penalty
-signal = final_score >= regime_threshold    [국면별 임계값 단독]
-```
+OKX 선물 시장을 대상으로 하는 암호화폐 트레이딩 시그널 봇. GitHub Actions 주기 실행, Telegram 알림.  
+핵심 목표: **신뢰도 높은 롱/숏 진입 시그널 생성 (양방향)**
 
-### 소프트 패널티 체인 (soft_penalty)
-
-| 패널티 | 배율 | 발동 조건 |
-|--------|------|-----------|
-| MTF RSI 과열 (강) | ×0.85 | 1h≥72 + 4h≥65 (롱) / 1h≤28 + 4h≤35 (숏) |
-| MTF RSI 과열 (약) | ×0.92 | 1h≥68 (롱) / 1h≤32 (숏) |
-| EXPLOSIVE 소진 | ×0.88 | EXPLOSIVE 국면 + 1h RSI≥70 (롱) / ≤30 (숏) |
-| 캔들모멘텀 역방향 | ×0.80~0.90 | 연속음봉 중 롱 / 연속양봉 중 숏 |
-| CHoCH 역방향 | ×0.88 | 추세 전환 경고 신호와 진입 방향 충돌 |
-| BOS 역방향 | ×0.82 | 추세 구조 확증 신호와 진입 방향 충돌 |
-
-soft_penalty = 해당 패널티 전체 곱산. 마이크로구조 패널티(micro_penalty)는 독립적으로 덧셈 적용.
+**모니터링 심볼:** `BTC/USDT`, `ETH/USDT`, `HYPE/USDT`, `SOL/USDT`, `SUI/USDT`, `XRP/USDT`
 
 ---
 
-## 시장 국면 분류 및 임계값
+## 파일 구조
 
-| 국면 | 분류 조건 | 임계값 | EMA 역방향 배율 (3/2/1/0 TF) |
-|------|-----------|--------|-------------------------------|
-| SQUEEZE | BB 스퀴즈 + ADX < 25 | 65pt | ×0.80 / ×0.87 / ×0.95 / ×1.00 |
-| TRENDING | ADX ≥ 25 + MA20 교차 적음 | 63pt | ×0.52 / ×0.72 / ×0.88 / ×1.00 |
-| RANGING | MA20 교차 ≥ 2 또는 ER < 0.15 | 62pt | ×0.82 / ×0.90 / ×0.96 / ×1.00 |
-| EXPLOSIVE | ADX ≥ 40 + BB 확장 | 65pt | ×0.75 / ×0.84 / ×0.93 / ×1.00 |
-
-> **v3.3 변경**: SIGNAL_MIN_SCORE(63) 제거. 기존에는 모든 국면 실질 임계값이 63pt로 수렴했음. 이제 국면별 임계값이 실제로 작동.
+```
+sigbot15/
+├── config.py               # 전역 설정 및 파라미터 (v4.0)
+├── analysis_engine.py      # 기술지표 분석 엔진 (v3.8)
+├── scoring_system.py       # 점수 산출 및 시그널 판정 (v4.0)
+├── data_pipeline.py        # OKX API 데이터 수집
+├── microstructure_analyzer.py  # 마이크로구조 분석
+├── notification.py         # Telegram 알림 전송
+└── main.py                 # 진입점
+```
 
 ---
 
-## 국면별 가중치
+## 점수 산출 흐름
+
+```
+[1] 지표 스코어 계산 (각 0~100pt)
+    RSI / 볼린저밴드 / 펀딩비 / 롱숏비율 / Taker비율 / 거래량
+
+[2] 레짐별 가중합
+    raw_score = Σ(지표점수 × 레짐가중치)
+
+[3] EMA 배율 적용
+    base_score = raw_score × ema_mult × gate_penalty
+
+[4] 보너스 합산
+    scored = base_score + bonus_total (캡 적용)
+
+[5] soft_penalty 체인 적용
+    final_score = scored × (MTF × 소진 × 캔들모멘텀 × CHoCH × BOS충돌 × EXPLOSIVE+BOS)
+
+[6] 마이크로구조·거래량 페널티 가산
+    final_score += micro_penalty + volume_penalty
+
+[7] 임계값 비교 → 시그널 판정
+    signal = (final_score >= regime_threshold)
+
+[8] 하드필터 순차 적용 (FVG모호, RANGING BOS없음, 유효근거)
+    → 최종 signal
+```
+
+---
+
+## 시장 국면 (Regime) 분류
+
+| 국면 | 조건 | 기본 임계 | 특징 |
+|------|------|-----------|------|
+| `SQUEEZE` | BB 스퀴즈 + ADX < 25 | **66pt** | 방향 미결정, 돌파 대기 |
+| `TRENDING` | ADX ≥ 25 | **64pt** | 추세 진행 중 |
+| `RANGING` | MA20 교차 ≥ 2회 + ER < 0.35 | **63pt** | 박스권 횡보 |
+| `EXPLOSIVE` | ADX ≥ 40 + BB 확장 ≥ 1.2x | **66pt** | 변동성 폭발 |
+
+**RANGING 동적 임계 상향** (v4.0 P3 — 합산 최대 +8pt):
+
+| 조건 | 추가 pt |
+|------|---------|
+| BB 스퀴즈 감지 | +2 |
+| ADX < 20 | +1~4 (ADX에 따라) |
+| EMA 역방향 ≥ 2TF | +3 |
+| **합산 상한** | **+8pt → 임계 최대 71pt** |
+
+> ADX 역추세(EMA 3/3 역방향 시 ADX 연동 +5~15pt)는 별도 블록으로 독립 적용됨
+
+---
+
+## 레짐별 지표 가중치
 
 | 지표 | RANGING | TRENDING | EXPLOSIVE | SQUEEZE |
 |------|---------|----------|-----------|---------|
-| RSI | 0.32 | 0.11 | 0.07 | 0.15 |
-| 볼린저밴드 | 0.26 | 0.09 | 0.06 | 0.35 |
+| RSI | 0.34 | 0.11 | 0.07 | 0.15 |
+| 볼린저밴드 | 0.28 | 0.09 | 0.06 | **0.35** |
 | 펀딩비 | 0.13 | 0.15 | 0.15 | 0.13 |
-| 롱숏비율 | 0.12 | 0.22 | 0.24 | 0.13 |
-| Taker | 0.10 | 0.34 | 0.38 | 0.19 |
+| 롱숏비율 | **0.07** | 0.18 | 0.18 | 0.13 |
+| Taker비율 | 0.11 | **0.38** | **0.44** | 0.19 |
 | 거래량 | 0.07 | 0.09 | 0.10 | 0.05 |
 
-거래량 점수는 `1.0x(평균) = 50pt` 기준으로 정규화. 다른 지표와 동일한 중립 기준 적용.
+> v4.0 P6: TRENDING/EXPLOSIVE에서 LS 가중치 하향(0.22/0.24→0.18), Taker 상향 — 방향 근거의 직접성 반영  
+> v3.9: RANGING LS 0.12→0.07 — 박스권에서 LS 쏠림 의존 실패 패턴 대응
 
 ---
 
-## 게이팅
+## EMA 역방향 배율
 
-신호 발화 이전 펀딩비·롱숏비율 조건 검사.
+방향과 반대인 TF EMA 수에 따라 raw_score를 감산:
 
-| 조건 | 배율 |
-|------|------|
-| 펀딩비 또는 롱숏 중 하나만 역풍 | ×0.92 |
-| 펀딩비 AND 롱숏 모두 역풍 | ×0.80 |
-| 정상 | ×1.00 |
-
-> **v3.3 변경**: 기존에는 둘 다 역풍일 때만 ×0.80. 단일 역풍 패널티(×0.92) 신규 추가.
+| 역방향 TF 수 | RANGING | TRENDING | EXPLOSIVE | SQUEEZE |
+|-------------|---------|----------|-----------|---------|
+| 0 (전방향 일치) | ×1.00 | ×1.00 | ×1.00 | ×1.00 |
+| 1 | ×0.96 | ×0.88 | ×0.93 | ×0.95 |
+| 2 | ×0.90 | ×0.72 | ×0.84 | ×0.87 |
+| 3 (전방향 역방향) | ×0.82 | ×0.52 | ×0.75 | ×0.80 |
 
 ---
 
 ## 보너스 체계
 
-| 보너스 | 포인트 | 조건 |
-|--------|--------|------|
-| 눌림목 강 | +12 | 1h RSI >58(롱) / <42(숏) + 15m 과매도/과매수 + EMA 2TF 이상 |
-| 눌림목 약 | +8 | 1h RSI >52(롱) / <48(숏) + 15m 눌림 + EMA 2TF 이상 |
-| 눌림목 미세 | +4 | 1h RSI 최소조건 + 15m 소폭 + EMA 1TF 이상 |
-| 추세 지속 (EMA+Taker) | +12 | EMA 3TF 일치 + Taker 강/중 일치 |
-| 돌파/붕괴 실패 | +12 | 최근 고점 돌파 후 되돌림 / 저점 붕괴 후 반등 |
-| 피보 황금포켓 | +10 | 61.8~65% 되돌림 구간 |
-| Post-Squeeze 모멘텀 | +10 | 이전 국면 SQUEEZE + BB 첫 돌파 캔들 |
-| 극단 멀티TF 과매도/과매수 | +10 | 15m/1h/4h RSI 동시 극단 + BB 극단 |
-| 거래량-가격 다이버전스 | +10 | 신저가+거래량급증 (롱) / 신고가+거래량감소 (숏) |
-| 대규모 청산 | +10 | 캔들 꼬리+거래량 기반 청산 프록시 감지 |
-| BOS 확증 (방향 일치) | +8 | 스윙 고점/저점 돌파 확증 + 진입 방향 일치 |
-| FVG 진입 | +8 | Fair Value Gap 내부 진입 |
-| 볼린저 극단 + RSI 다이버전스 | +8 | BB 극단 + RSI 다이버전스 동시 |
-| 시장 구조 (LowerHigh/HigherLow) | +8 | 스윙 고점 하락 / 저점 상승 구조 |
-| 캔들 핀바 | +10 | 긴 꼬리 역전형 캔들 패턴 |
-| 캔들 인걸핑 | +8 | 전캔들 포용형 역전 패턴 |
-| 히든 다이버전스 | +6 | 추세 지속형 RSI 히든 다이버전스 |
-| 거래량 폭발 | +7 | 2.5x 이상 거래량 + ADX ≥ 22 |
-| 펀딩비+롱숏 동방향 | +6 | 두 심리 지표 동시 진입 방향 유리 |
-| 피보 주요레벨 | +5 | 38.2 / 50 / 78.6% 근접 |
-| FVG 진입 (방향 모호) | +4 | 강세+약세 FVG 동시 활성 |
+### 보너스 종류 및 지급 조건
 
-**보너스 캡 (티어드):**
+| 번호 | 보너스명 | pt | 핵심 조건 |
+|------|----------|----|-----------|
+| ① | 멀티TF극단과매도/수 | +10 | 전TF RSI 극단 + BB 극단 위치 일치 |
+| ② | 볼린저극단+RSI다이버전스 | +8 | BB 극단 + RSI 다이버전스 + RSI 극단(15m≤38 or ≥65) |
+| ③ | 펀딩비+롱숏비율 | +6 | 펀딩비·LS 동일 방향 |
+| ④ | 대규모청산꼬리 | +10 | 대규모 청산 감지 + 방향 일치 + BOS 충돌 없음 |
+| ⑤ | 추세지속:EMA+Taker | +12 | EMA 3/3 + Taker 강세/약세 일치 |
+| ⑥ | 눌림목강 | +12 | 1h RSI > 58(롱) / < 42(숏) + 15m 반대방향 + EMA ≥ 2TF |
+| ⑦ | 눌림목약 | +8 | 1h RSI > 52(롱) / < 48(숏) + EMA ≥ 2TF |
+| ⑧ | 눌림목미세 | +4 | **1h < 49(숏) / > 51(롱)** + **15m > 60(숏) / < 40(롱)** + EMA ≥ 1TF |
+| ⑨ | 거래량다이버전스 | +10 (RANGING×0.6, SQUEEZE×0.5) | 신고가+거래량감소 or 신저가+거래량증가 |
+| ⑩ | 돌파실패/붕괴실패 | +12 (RANGING/SQUEEZE +6) | 20봉 고점/저점 터치 후 되돌림 |
+| ⑪ | FVG강세/약세진입 | +8 (모호 +4) | 미충전 FVG 내부 + 방향 일치 |
+| ⑫ | **FVG역방향저항/지지** | **-4** | 역방향 FVG 내부 진입 (기관 저항/지지) |
+| ⑬ | BOS 방향확증 | +8 | BOS 방향 일치 |
+| ⑭ | 피보황금포켓 | +10 | 0.618~0.650 되돌림 |
+| ⑮ | 피보주요레벨 | +5 | 0.382 / 0.500 / 0.786 근접 |
+| ⑯ | 히든다이버전스 | +6 | 히든 강세/약세 다이버전스 (ADX ≥ 18 또는 TRENDING/EXPLOSIVE) |
+| ⑰ | 캔들핀바/인걸핑 | +10/+8 | 방향 일치 캔들 패턴 |
+| ⑱ | 거래량폭발 | +7 | 거래량비율 ≥ 2.0x + ADX ≥ 22 + **ema_same ≥ 1** |
+| ⑲ | Post-Squeeze | +10 | 이전 SQUEEZE + BB 첫 이탈 캔들 |
 
-| base_score | 보너스 상한 |
-|------------|------------|
-| < 36pt | 18pt |
-| 36~44pt | 26pt |
-| ≥ 44pt | 36pt |
+### 보너스 상한 (캡)
 
-### 보너스 억제 조건
+| 조건 | 캡 |
+|------|-----|
+| base_score < 36pt | +18pt |
+| base_score < 44pt | +26pt |
+| base_score ≥ 44pt | +36pt |
+| BOS 역방향 단독 | +22pt |
+| BOS 역방향 + EMA 3/3 역방향 | +14pt |
 
-| 조건 | 억제 대상 | 효과 |
-|------|-----------|------|
-| EMA 3TF 역방향 + BB 극단 아님 | 거래량·다이버전스 보너스 | ×0.25 |
-| Taker 역방향 | 캔들 패턴 보너스 | ×0.40 |
-| EXPLOSIVE 소진 패널티 중 | 추세 확인형 보너스 | 제거 |
-| **거래량 < 평균의 30%** | **구조·다이버전스 보너스** | **×0.50** |
+> 음수 보너스(FVG역방향, -4pt)는 캡 계산에서 분리 — 양수 캡 적용 후 음수를 별도 합산
 
-> **v3.3 신규**: 저유동성 구조 패턴 보너스 억제. 거래량이 평균의 30% 미만이면 LowerHigh구조, HigherLow구조, 돌파실패, 붕괴실패, 거래량다이버전스, 볼린저극단+RSI다이버전스를 50%로 감산. 눌림목·FVG·BOS·피보·펀딩/LS는 억제 제외.
+### 보너스 감산 규칙 (v4.0 P7 단일 감산 원칙)
+
+동일 보너스에 여러 감산 조건이 중첩될 경우 **가장 강한 1개만 적용**:
+
+| 감산 조건 | 대상 보너스 | 배율 |
+|-----------|------------|------|
+| EMA 3/3 역방향 | 거래량다이버전스, BB극단+RSI다이버전스 | ×0.25 |
+| Taker 역방향 | 캔들패턴 (핀바, 인걸핑) | ×0.40 |
+| SQUEEZE 레짐 | 캔들패턴 | ×0.50 |
+| 저거래량(vol < 35pt) | 구조패턴, 거래량다이버전스, BB극단+RSI다이버전스 | ×0.50 |
 
 ---
 
-## 마이크로구조 분석 (6개 방안)
+## soft_penalty 체인
 
-`microstructure_analyzer.py` — 별도 API 호출로 추가 order flow 데이터 수집.
-
-| 방안 | 이름 | 데이터 소스 | 최대 패널티 | 최대 보너스 |
-|------|------|-------------|-------------|-------------|
-| 1 | Liquidation Cascade | OKX 청산 주문 API | -15pt | +8pt |
-| 2 | Order Book Wall | 호가창 (CCXT) | -12pt | — |
-| 3 | OB Volume Imbalance | 호가창 잔량 비율 | -10pt | +7pt |
-| 4 | Candle Momentum | 5분봉 OHLCV | -8pt | +6pt |
-| 5 | Mark Price + Funding | OKX 마크가격/펀딩비 | -14pt | +5pt |
-| 6 | LS Divergence | OKX 계좌 기준 LS 비율 | -10pt | +8pt |
-
-합산 패널티 하한: **-30pt** (캡 적용).
-
-마이크로구조 패널티는 소프트 패널티 이후 **덧셈** 방식으로 적용:
 ```
-final_score = (base + bonus) × soft_penalty + micro_penalty
+soft_penalty = MTF_RSI × EXPLOSIVE소진 × EXPLOSIVE준과매도수 × 청산역방향
+               × 캔들모멘텀 × CHoCH × BOS충돌 × EXPLOSIVE+BOS
 ```
-독립적 order flow 근거로 BOS 패널티를 partial offset/reinforce 허용 (의도적 설계).
 
-> **v3.3 변경**: OI Velocity (방안 3) 완전 제거. OKX API 오류 지속 + 폴백 시 항상 중립 반환으로 실효성 없음. `oi_history` 키 → `ohlcv_micro` 리네임.
+> v4.0 P5: `ranging_bos_weak_penalty` 제거 — RANGING에서 BOS역방향은 `BOS_CONFLICT_PENALTY_RANGING = 0.76` 단일값으로 통합  
+> (기존 0.82 × 0.90 = 0.738 이중 패널티 해소)  
+> SOFT_PENALTY_FLOOR 제거 (이중 패널티 원인 해소로 불필요)
+
+| 패널티 | 배율 | 발동 조건 |
+|--------|------|-----------|
+| MTF RSI 강 | ×0.85 | 1h RSI 극단 과매수/과매도 (롱/숏 각각) |
+| MTF RSI 약 | ×0.92 | 1h RSI 약 과매수/과매도 |
+| EXPLOSIVE 소진 | ×0.88 | EXPLOSIVE + 1h RSI ≥ 70(롱) / ≤ 30(숏) |
+| EXPLOSIVE 준과매도/수 | ×0.80 | EXPLOSIVE + 역방향 RSI/BB 조합 |
+| 청산 역방향 | ×0.92 | 청산 유리 방향 ≠ 진입 방향 |
+| 캔들모멘텀 | ×0.80~0.90 | 연속 반대 봉 (레짐별 강도 다름) |
+| CHoCH 역방향 | ×0.88 | CHoCH 전환 신호 중 역방향 진입 |
+| BOS 충돌 (비RANGING) | ×0.82 | BOS 방향과 진입 방향 충돌 |
+| BOS 충돌 (RANGING) | **×0.76** | RANGING 전용 통합값 |
+| EXPLOSIVE+BOS 강화 | ×0.85 | EXPLOSIVE + BOS 충돌 |
+| Gate 복합 패널티 | ×0.80 | 펀딩비+LS 모두 역방향 |
+| Gate 단일 패널티 | ×0.92 | 펀딩비 or LS 역방향 |
 
 ---
 
-## 동적 쿨다운
+## 하드 차단 필터 (4레이어)
 
-같은 심볼·방향으로 연속 신호 발화 방지.
+### 레이어 1 — BB streak 억제
+TRENDING 레짐에서 BB 상단/하단 연속 이탈 ≥ 3캔들 → 신호 완전 차단  
+(단, RSI ≤ 28 극단과매도 시 면제)
 
-| 조건 | 쿨다운 |
-|------|--------|
-| 기본 | 60분 |
-| 직전 신호 이후 +3% 이상 상승 (롱) | 75분 |
-| 직전 신호 이후 +5% 이상 상승 (롱) | 120분 |
-| 직전 신호 이후 -2.5% 이상 하락 | 0분 (즉시 리셋) |
+### 레이어 2 — FVG 양방향 모호 + 저거래량
+강세·약세 FVG 동시 + 거래량 점수 < 30pt → 차단
+
+### 레이어 3 — RANGING BOS없음 + EMA 역방향 (v4.0 P2)
+RANGING + BOS 자체가 없음(구조 미확인) + EMA 역방향 ≥ 2TF → 차단  
+> **역방향 BOS는 허용** — BOS충돌패널티(×0.76)로 소프트 처리. BOS가 아예 없는 경우만 차단.
+
+### 레이어 4 — 유효 근거 최소 N개 (v4.0 P1)
+신호 통과 후 유효 근거 수가 레짐별 최소 기준 미달 시 차단:
+
+**근거 항목 8개:**
+
+| 유형 | 항목 | 롱/숏 대칭 |
+|------|------|-----------|
+| 추세확인형 | ① EMA ≥ 2TF 방향 일치 | ✅ |
+| 추세확인형 | ② BOS 방향 확증 | ✅ |
+| 추세확인형 | ③ 히든 다이버전스 방향 일치 | ✅ |
+| 추세확인형 | ④ FVG 방향 단독 일치 | ✅ |
+| 추세확인형 | ⑤ 피보나치 황금포켓 | ✅ |
+| **반전형** | **⑥ 멀티TF 극단 과매도/과매수** | ✅ |
+| **반전형** | **⑦ 대규모 청산꼬리 방향 일치** | ✅ |
+| **반전형** | **⑧ BB극단 + RSI 다이버전스** | ✅ |
+
+**레짐별 최소 기준:**
+
+| 레짐 | 최소 근거 수 | 이유 |
+|------|-------------|------|
+| SQUEEZE | **1개** | 방향 자체가 불확실한 구간, 조기 진입 허용 |
+| RANGING | **2개** | 추세·반전 모두 유효, 기준 유지 |
+| TRENDING / EXPLOSIVE | **2개** | 추세 확인 필요 |
+
+> v4.0 이전: 추세확인형 5개만 있어 반전 진입(극단과매도 롱 등) 구조적 차단 → 반전형 3개 추가로 해소
 
 ---
 
-## v3.x 변경 이력
+## SMC 분석 구성요소
 
-### v3.3
+| 항목 | 설명 |
+|------|------|
+| **FVG** (Fair Value Gap) | 기관 미충전 주문 구간. 방향 일치 +8pt, 역방향 -4pt, 양방향모호 +4pt |
+| **BOS** (Break of Structure) | 스윙 고점/저점 이탈. 방향 일치 +8pt 보너스, 역방향 ×0.76~0.82 패널티 |
+| **CHoCH** (Change of Character) | 추세 전환 경고. 역방향 진입 시 ×0.88 패널티 |
+| **피보나치** | 50봉 스윙 기준. 황금포켓(0.618~0.650) +10pt, 주요레벨 +5pt |
+| **시장 구조** | HigherLow / LowerHigh / 돌파실패 / 붕괴실패. RANGING/SQUEEZE 시 +6pt(반감) |
 
-- **SIGNAL_MIN_SCORE 제거**: 기존 63pt 하한이 국면별 임계값을 무력화하던 문제 해소. 알림에 표시되는 임계값과 실제 동작 일치.
-- **거래량 스코어 정규화**: `1.0x(평균) = 50pt`. 기존 20pt 기준에서 다른 지표와 동일한 중립 기준으로 변경.
-- **국면별 가중치 재분배**: 정규화에 맞게 거래량 가중치 하향, 핵심 지표(Taker/RSI/BB) 재분배.
-- **Gate 단일 패널티 추가**: 펀딩비 또는 롱숏 하나만 역풍이어도 ×0.92 적용.
-- **저유동성 구조 패턴 보너스 억제**: vol_ratio < 0.30 시 구조·다이버전스 보너스 50% 감산.
-- **base_score 유령 계산 제거**: `base_before_soft` 별칭 제거, 단일 변수 통합.
-- **보너스 재조정**: FAILED_BREAKOUT 14→12pt, BOS_CONFIRM 6→8pt.
-- **OI Velocity 완전 제거**: 마이크로구조 방안 7개 → 6개, `ohlcv_micro` 키 리네임.
-- **notification**: BOS 역방향 패널티 표시 추가, adx_multiplier 데드코드 제거.
+---
 
-### v3.2
+## MTF RSI 분석
 
-- **BOS 역방향 패널티**: 하락 BOS 확증 중 롱 / 상승 BOS 확증 중 숏 진입 시 ×0.82.
-- **쿨다운 리셋 임계값**: -1% → -2.5%. 소폭 하락으로 쿨다운 리셋되던 문제 수정.
+```
+v_weighted = (15m × 0.50) + (1h × 0.30) + (4h × 0.20)
+```
 
-### v3.1
+**눌림목 조건 (v3.8 강화 — 15분봉 노이즈 대응):**
 
-- **OI 관련 섹션 제거**: API 400 오류 지속으로 전면 제거.
+| 타입 | 숏 조건 | 롱 조건 | EMA 요구 |
+|------|---------|---------|---------|
+| 강 | 1h < 42, 15m > 60 | 1h > 58, 15m < 40 | ≥ 2TF |
+| 약 | 1h < 48, 15m > 56 | 1h > 52, 15m < 44 | ≥ 2TF |
+| 미세 | **1h < 49, 15m > 60** | **1h > 51, 15m < 40** | ≥ 1TF |
 
-### v3.0
+> 미세 조건 강화 배경: 1h RSI 49~52는 중립 수준으로 15분봉 노이즈와 구분 불가
 
-- **멀티레이어 스코어링 시스템**: 시장 국면 분류 + 국면별 가중치/임계값/EMA 배율.
-- **3단계 눌림목 감지**: Strong/Weak/Micro (롱/숏 대칭).
-- **Volume Explosion 보너스**: +7pt, EMA 정렬 불필요.
-- **Post-Squeeze Momentum**: +10pt, 이전 국면 추적 기반.
+---
+
+## 거래량 체계
+
+**baseline 산출 방식 (v3.5):**
+```
+baseline = mean(1h 캔들 최근 120개) / 4
+current  = 직전 완성 15m 캔들
+ratio    = current / baseline
+```
+
+| ratio | 점수 | 거래량 페널티 |
+|-------|------|--------------|
+| < 0.5x | 0~25pt | -8pt (< 20pt) |
+| 0.5~1.0x | 25~50pt | -5pt (< 35pt) |
+| 1.0~1.5x | 50~70pt | 없음 |
+| 1.5~2.5x | 70~90pt | 없음 |
+| > 2.5x | 90~100pt | 없음 |
+
+**거래량 폭발 보너스 조건 (v4.0 P4):**
+- ratio ≥ 2.0x, ADX ≥ 22, **ema_same ≥ 1** (방향 근거 최소 1TF)
+- 이전: `ema_same < 3` → EMA 3/3 완전정렬 시 오히려 미지급되는 역설 수정
+
+---
+
+## 버전 이력
+
+| 버전 | 주요 변경 |
+|------|-----------|
+| **v4.0** | 과적합 방지 전면 개선: 근거필터 반전형 확장, BOS필터 완화, RANGING 임계 상한, 거래량폭발 조건 재설계, 이중패널티 통합, LS 가중치 조정, 단일 감산 원칙 |
+| v3.9 | RANGING LS 가중치 삭감, BOS없음+EMA역방향 하드필터, EMA역방향 임계+3pt, soft_floor, 유효근거 최소 2개 |
+| v3.8 | LS 극단 임계값 강화, FVG 역방향 패널티, VPD SQUEEZE 감액, RANGING 저ADX 임계 동적 상향, SQUEEZE 거래량폭발 EMA 조건, 눌림목미세 조건 강화 |
+| v3.7 | EXPLOSIVE 준과매도/수 역방향 패널티, 청산 역방향 소프트 패널티 |
+| v3.6 | 히든다이버전스 ADX 가드, HL/LH 구조 RANGING 차단, SQUEEZE 캔들 감액 |
+| v3.5 | 거래량 baseline 1h 캔들/4, BOS역방향 보너스 캡, 저ADX+BOS 억제 |
+| v3.4 | EXPLOSIVE+BOS 강화 패널티, ADX 역추세 임계값 연동, FVG 모호+저거래량 차단 |
+| v3.3 | Volume 정규화 및 거래량 페널티, 음수 신호 차단 |
+| v3.2 | BOS_CONFLICT_PENALTY = 0.82 |
+
+---
+
+## 환경 변수
+
+```bash
+OKX_API_KEY=...
+OKX_API_SECRET=...
+OKX_PASSPHRASE=...
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
 
 ---
 
 ## 설치 및 실행
 
-### 요구사항
-
-```
-Python 3.10+
-ccxt
-pandas
-numpy
-requests
-```
-
-### 환경변수
-
-```
-OKX_API_KEY
-OKX_API_SECRET
-OKX_PASSPHRASE
-TELEGRAM_BOT_TOKEN
-TELEGRAM_CHAT_ID
-```
-
-### GitHub Actions 설정
-
-```yaml
-jobs:
-  signal:
-    strategy:
-      matrix:
-        symbol: ["BTC/USDT", "ETH/USDT", "HYPE/USDT", "SOL/USDT", "SUI/USDT"]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install ccxt pandas numpy requests
-      - run: python src/main.py
-        env:
-          SINGLE_SYMBOL: ${{ matrix.symbol }}
-          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-          OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
-          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-```
-
-### 로컬 실행
-
 ```bash
-SINGLE_SYMBOL="BTC/USDT" python src/main.py
+pip install ccxt python-telegram-bot pandas numpy
+
+# 직접 실행
+python main.py
+
+# GitHub Actions: .github/workflows/bot.yml 설정
 ```
 
 ---
 
 ## 신호 등급
 
-| 등급 | 점수 | 설명 |
+| 등급 | 조건 | 의미 |
 |------|------|------|
-| 🔥🔥 STRONG | ≥ 85pt | 매우 강한 신호 — 즉시 대응 권장 |
-| 🔥 GOOD | ≥ 72pt | 좋은 신호 — 표준 진입 |
-| 📊 WATCH | ≥ 임계값 | 기준 통과 — 확인 후 진입 |
-
-마이크로구조 경고(패널티 ≤ -10pt)가 존재하면 STRONG/GOOD 등급에 ⚠️ 표시.
+| 🔥 `GOOD` | final_score ≥ regime_threshold + 8 | 표준 진입 |
+| 📊 `WATCH` | final_score ≥ regime_threshold | 확인 후 진입 |
 
 ---
 
 ## 주의사항
 
-본 시스템은 참고용 신호 생성 도구입니다. 모든 투자 결정과 그에 따른 손익은 사용자 본인의 책임입니다. 자동 주문 실행 전 반드시 백테스팅과 수익성 검증이 선행되어야 합니다.
+- 이 봇은 시그널 생성 전용이며 자동 주문 실행 기능을 포함하지 않습니다.
+- 모든 신호는 참고용이며 투자 결정은 본인 책임입니다.
+- GitHub Actions의 실행 지연(~5분)으로 인해 신호 발생 시점과 실제 진입 시점에 차이가 발생할 수 있습니다.
+- 백테스팅 없이 자동 주문 실행으로 확장하는 것은 권장하지 않습니다.
