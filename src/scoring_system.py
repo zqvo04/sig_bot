@@ -1,39 +1,31 @@
 """
-scoring_system.py — 점수 산출 (v3.8) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
+scoring_system.py — 점수 산출 (v4.0) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
 ────────────────────────────────────────────────────────────────────
 ⚠️ 이 코드는 15분봉(15m entry) 시그봇 전용입니다. 1시간봉 버전과 혼동 금지.
    모든 진입 점수 산출은 15분봉 기준. 1h/4h는 MTF-RSI 페널티 참조용.
 ────────────────────────────────────────────────────────────────────
-[v3.8 추가] ← 어제(2026-05-28~29) 불량신호 8건 대응 업그레이드
+[v4.0 추가] ← 과적합 방지 전면 개선 (양방향 설계)
 
-㉕ 돌파실패/붕괴실패 보너스 RANGING/SQUEEZE 반감 (⑧ 섹션)
-   근거: 15m 20캔들=5시간. 박스권 내 등락이면 failed_breakout 노이즈 반복.
-         LowerHigh/HigherLow는 이미 RANGING/SQUEEZE 차단했으나
-         failed_breakout/failed_breakdown만 예외였던 비일관성 보정.
-   효과: HYPE 14:45(돌파실패 +12→+6), HYPE 03:30·05:00(붕괴실패 +12→+6)
+P1. 근거필터 반전형 항목 확장 (⑥멀티TF극단 ⑦청산꼬리 ⑧BB극단+RSI다이버전스)
+    + 레짐별 최소 기준: SQUEEZE=1개, RANGING/기타=2개
 
-㉖ FVG 역방향 패널티 신설 (⑨ 섹션)
-   근거: bear_fvg + d=long (약세FVG 내 롱), bull_fvg + d=short 조건에
-         아무 처리가 없어 기관 저항/지지 구간 진입에 패널티 부재.
-   적용: 역방향 단독 FVG → -BONUS_FVG_ENTRY_CONFLICTED(-4pt) 보너스
-   효과: HYPE LONG 03:30(약세FVG 내 롱) -4pt
+P2. ㉛BOS필터 bos_same→bos_any 완화 (역방향BOS도 구조 확인으로 인정)
 
-㉗ 거래량-가격 다이버전스 SQUEEZE 감액 (⑦ 섹션)
-   근거: 캔들 패턴은 SQUEEZE ×0.50 감액되나 거래량다이버전스는 예외였음.
-         SQUEEZE=방향 미결정 → 동일 기준 적용.
-   적용: VPD_MULT_SQUEEZE(0.50)
-   효과: HYPE LONG 03:30(거래량강세다이버전스 +10→+5) -5pt
+P3. RANGING 임계 동적 상향 합산 상한 +8pt 설정
+    BB스퀴즈+저ADX+EMA역방향 중첩 합산 ≤+8pt → 임계 최대 71pt
 
-㉘ RANGING 저ADX 임계값 동적 상향 (signal 판정 직전)
-   근거: 15m RANGING이 ADX값 무관 동일 임계(63pt). ADX 15(노이즈)와
-         ADX 24(약추세)를 동일 취급.
-   적용: ADX<20 시 boost = min(4, int((20-adx)/1.5)) → 임계 상향
-   효과: XRP 15:30(ADX15 → 임계63+3=66), HYPE 05:00(ADX16 → 65)
+P4. 거래량폭발 조건 재설계: ema_same<3 → ema_same>=1
+    방향근거 전무 시 미지급, 완전정렬도 허용
 
-㉙ SQUEEZE 거래량폭발 EMA 방향 근거 요구 (⑭ 섹션)
-   근거: SQUEEZE=방향 미결정. EMA 전방향 역방향(ema_same=0)인데
-         거래량폭발 보너스 지급은 방향 근거 없음.
-   적용: SQUEEZE + ema_same==0 → 거래량폭발 미지급
+P5. ranging_bos_weak_penalty 제거 → BOS_CONFLICT_PENALTY_RANGING(0.76) 통합
+    이중 패널티(0.82×0.90) 해소, SOFT_PENALTY_FLOOR 제거
+
+P6. TRENDING/EXPLOSIVE LS 가중치 0.22/0.24→0.18, Taker 상향 (config)
+
+P7. 보너스 단일 감산 원칙: 동일 보너스에 중첩 감산 시 가장 강한 1개만 적용
+
+[v3.8] 돌파실패 반감, FVG역방향패널티, VPD SQUEEZE감액,
+       RANGING 저ADX임계 상향, SQUEEZE 거래량폭발 EMA조건, 눌림목미세 강화
 
 [v3.7] EXPLOSIVE 준과매도/과매수 역방향 패널티(P1), 청산 역방향 소프트 패널티(P3)
 [v3.6] 히든다이버전스 ADX 가드, HL/LH 구조 RANGING 차단, SQUEEZE 캔들 감액
@@ -538,17 +530,22 @@ def calculate_entry_score(analysis: dict, direction: str,
         elif candle.get("bullish_engulf"): bonuses.append(("불리시인걸핑",   config.BONUS_CANDLE_ENGULFING))
 
     # ⑭ 거래량 폭발
-    # [v3.8 ㉙] SQUEEZE + EMA 전방향 역방향(ema_same=0) → 방향 근거 없음 → 미지급
+    # [v4.0 P4] ema_same<3 → ema_same>=1 으로 재설계
+    #   이전: ema_same<3 = EMA 완전정렬이 아닌 경우 (역설: EMA3/3 완전일치 시 미지급)
+    #   개선: ema_same>=1 = 최소 1TF 방향 근거 있을 때 지급
+    #         ema_same=0 (전방향 역방향) → 미지급
+    #         ema_same=3 (완전정렬) → 지급 (추세 확신 구간에서 거래량 폭발은 유효)
     vol_ratio = vol.get("ratio", 1.0)
     adx_val   = adx_15m.get("adx", 0.0)
-    if vol_ratio >= config.VOLUME_EXPLOSION_MULTIPLIER and adx_val >= 22.0 and ema_same < 3:
-        if regime_name == "SQUEEZE" and ema_same == 0:
-            logger.info(
-                f"[거래량폭발/{d.upper()}] SQUEEZE+EMA0정렬 → 미지급 "
-                f"(방향 근거 없음, ratio:{vol_ratio:.2f}x)"
-            )
-        else:
+    if vol_ratio >= config.VOLUME_EXPLOSION_MULTIPLIER and adx_val >= 22.0:
+        if ema_same >= config.VOLUME_EXPLOSION_MIN_EMA_SAME:
             bonuses.append(("거래량폭발", config.BONUS_VOLUME_EXPLOSION))
+        else:
+            logger.info(
+                f"[거래량폭발/{d.upper()}] ema_same={ema_same} "
+                f"< {config.VOLUME_EXPLOSION_MIN_EMA_SAME} → 방향 근거 없음, 미지급 "
+                f"(ratio:{vol_ratio:.2f}x)"
+            )
 
     # ⑮ Post-Squeeze 모멘텀
     prev_regime   = analysis.get("prev_regime", "")
@@ -570,59 +567,74 @@ def calculate_entry_score(analysis: dict, direction: str,
         bonuses = [(n,v) for n,v in bonuses if n not in tc]
         if removed: logger.info(f"[소진보너스제거] {[n for n,_ in removed]}")
 
-    # ── EMA 3역방향 시 반전 보너스 75% 감산 ─────────────────────
-    _REV = {"거래량강세다이버전스","거래량약세다이버전스","볼린저극단+RSI다이버전스"}
-    if ema_all_reverse and not bb_reversal_exempt:
-        bonuses = [(n, round(v*0.25) if n in _REV else v) for n,v in bonuses]
-
-    # ── Taker 역방향 시 캔들 보너스 감산 ────────────────────────
-    _CANDLE = {"불리시핀바","베어리시핀바","불리시인걸핑","베어리시인걸핑"}
+    # ── [v4.0 P7] 보너스 단일 감산 원칙 ──────────────────────────
+    # 동일 보너스에 여러 감산 조건이 중첩될 때 가장 강한 1개만 적용
+    # 감산 대상 집합 정의
+    _REV        = {"거래량강세다이버전스","거래량약세다이버전스","볼린저극단+RSI다이버전스"}
+    _CANDLE     = {"불리시핀바","베어리시핀바","불리시인걸핑","베어리시인걸핑"}
+    _LOW_VOL_STRUCT = {
+        "LowerHigh구조","HigherLow구조",
+        "돌파실패","붕괴실패",
+        "돌파실패(박스권반감)","붕괴실패(박스권반감)",
+        "거래량강세다이버전스","거래량약세다이버전스",
+        "볼린저극단+RSI다이버전스",
+    }
     _taker_against = (
         (d == "long"  and taker_bias == "sell_dominant") or
         (d == "short" and taker_bias == "buy_dominant")
     )
-    if _taker_against:
-        bonuses = [(n, round(v*0.40) if n in _CANDLE else v) for n,v in bonuses]
-
-    # ── [v3.6] SQUEEZE 국면 캔들 보너스 감액 ────────────
-    if regime_name == "SQUEEZE":
-        _sq_candle_affected = [(n, v) for n, v in bonuses if n in _CANDLE]
-        if _sq_candle_affected:
-            bonuses = [
-                (n, round(v * config.SQUEEZE_CANDLE_BONUS_MULT) if n in _CANDLE else v)
-                for n, v in bonuses
-            ]
-            logger.info(
-                f"[SQUEEZE캔들/{d.upper()}] 방향 불확실 → "
-                f"{[n for n, _ in _sq_candle_affected]} "
-                f"×{config.SQUEEZE_CANDLE_BONUS_MULT:.2f}"
-            )
-
-    # ── 저유동성 구조 패턴 보너스 억제 ──────────────────────────
-    # [v3.8] 박스권반감 명칭도 억제 대상에 포함
-    _LOW_VOL_STRUCT = {
-        "LowerHigh구조", "HigherLow구조",
-        "돌파실패",       "붕괴실패",
-        "돌파실패(박스권반감)", "붕괴실패(박스권반감)",
-        "거래량강세다이버전스", "거래량약세다이버전스",
-        "볼린저극단+RSI다이버전스",
-    }
     vol_score_struct = vol.get("score", 50.0)
-    if vol_score_struct < config.VOLUME_PENALTY_MID_THRESHOLD:
-        affected = [(n, v) for n, v in bonuses if n in _LOW_VOL_STRUCT]
-        if affected:
-            bonuses = [
-                (n, round(v * 0.5) if n in _LOW_VOL_STRUCT else v)
-                for n, v in bonuses
-            ]
-            before_sum = sum(v for _, v in affected)
-            after_sum  = sum(round(v * 0.5) for _, v in affected)
-            logger.info(
-                f"[저유동성/{d.upper()}] vol:{vol_score_struct:.1f}pt"
-                f" < {config.VOLUME_PENALTY_MID_THRESHOLD}pt"
-                f" → 구조패턴 보너스 {before_sum}pt → {after_sum}pt (50% 감산)"
-                f" [{chr(44).join(n for n, _ in affected)}]"
-            )
+    _low_vol_struct  = vol_score_struct < config.VOLUME_PENALTY_MID_THRESHOLD
+
+    if config.BONUS_REDUCTION_SINGLE:
+        # 각 보너스에 적용 가능한 감산 배율을 모아 가장 강한(숫자 작은) 1개만 적용
+        new_bonuses = []
+        _reduction_log = []
+        for name, val in bonuses:
+            if val <= 0:   # 음수 보너스(패널티형)는 감산 미적용
+                new_bonuses.append((name, val))
+                continue
+            candidates = []
+            if name in _REV         and ema_all_reverse and not bb_reversal_exempt:
+                candidates.append(("EMA3역방향", 0.25))
+            if name in _CANDLE      and _taker_against:
+                candidates.append(("Taker역방향", 0.40))
+            if name in _CANDLE      and regime_name == "SQUEEZE":
+                candidates.append(("SQUEEZE캔들", config.SQUEEZE_CANDLE_BONUS_MULT))
+            if name in _LOW_VOL_STRUCT and _low_vol_struct:
+                candidates.append(("저유동성", 0.50))
+            if candidates:
+                strongest = min(candidates, key=lambda x: x[1])
+                new_val   = round(val * strongest[1])
+                if new_val != val:
+                    _reduction_log.append(
+                        f"{name}:{val}→{new_val}pt(×{strongest[1]},[{strongest[0]}])"
+                    )
+                new_bonuses.append((name, new_val))
+            else:
+                new_bonuses.append((name, val))
+        bonuses = new_bonuses
+        if _reduction_log:
+            logger.info(f"[단일감산/{d.upper()}] {', '.join(_reduction_log)}")
+    else:
+        # BONUS_REDUCTION_SINGLE=False 시 기존 순차 중첩 방식 유지
+        if ema_all_reverse and not bb_reversal_exempt:
+            bonuses = [(n, round(v*0.25) if n in _REV else v) for n,v in bonuses]
+        if _taker_against:
+            bonuses = [(n, round(v*0.40) if n in _CANDLE else v) for n,v in bonuses]
+        if regime_name == "SQUEEZE":
+            _sq_aff = [(n,v) for n,v in bonuses if n in _CANDLE]
+            if _sq_aff:
+                bonuses = [(n, round(v*config.SQUEEZE_CANDLE_BONUS_MULT) if n in _CANDLE else v)
+                           for n,v in bonuses]
+                logger.info(f"[SQUEEZE캔들/{d.upper()}] {[n for n,_ in _sq_aff]} ×{config.SQUEEZE_CANDLE_BONUS_MULT:.2f}")
+        if _low_vol_struct:
+            _aff = [(n,v) for n,v in bonuses if n in _LOW_VOL_STRUCT]
+            if _aff:
+                before = sum(v for _,v in _aff)
+                bonuses = [(n, round(v*0.5) if n in _LOW_VOL_STRUCT else v) for n,v in bonuses]
+                after = sum(round(v*0.5) for _,v in _aff)
+                logger.info(f"[저유동성/{d.upper()}] {before}pt→{after}pt [{','.join(n for n,_ in _aff)}]")
 
     # ── [v3.4] 역추세 보너스 캡 / 티어드 캡 ─────────────────────
     # [v3.8] 음수 보너스(FVG역방향)는 캡 영향 없이 그대로 합산되도록
@@ -709,18 +721,21 @@ def calculate_entry_score(analysis: dict, direction: str,
         volume_penalty = 0
 
     # ── 최종 점수 ────────────────────────────────────────────────
-    ranging_bos_weak_penalty = 1.0
+    # [v4.0 P5] ranging_bos_weak_penalty(기존 ×0.90) 제거
+    #   이전: RANGING에서 BOS역방향 시 bos_conflict(×0.82) × ranging_bos_weak(×0.90) = ×0.738 이중 적용
+    #   개선: BOS_CONFLICT_PENALTY_RANGING(=0.76) 단일값으로 통합
+    #         RANGING에서 bos_conflict_penalty를 0.76으로 덮어씀 (원래 0.82 적용된 상태)
     _adx_cur = adx_15m.get("adx", 0.0)
-    if (bos_conflict_penalty < 1.0
-            and _adx_cur < config.ADX_BOS_COUNTER_THRESHOLD
-            and regime_name == "RANGING"):
-        ranging_bos_weak_penalty = 0.90
+    if (bos_conflict_penalty < 1.0 and regime_name == "RANGING"):
+        _old_bos = bos_conflict_penalty
+        bos_conflict_penalty = config.BOS_CONFLICT_PENALTY_RANGING  # 0.76
         logger.info(
-            f"[저ADX+BOS역방향/{d.upper()}] "
-            f"RANGING+BOS역방향+ADX:{_adx_cur:.0f}<{config.ADX_BOS_COUNTER_THRESHOLD} "
-            f"→ ×{ranging_bos_weak_penalty:.2f} 추가 (합산 ×{bos_conflict_penalty*ranging_bos_weak_penalty:.3f})"
+            f"[RANGING_BOS통합/{d.upper()}] "
+            f"RANGING BOS역방향 단일패널티 ×{_old_bos}→×{bos_conflict_penalty:.2f} "
+            f"(이중패널티 해소, ADX:{_adx_cur:.0f})"
         )
 
+    # [v4.0 P5] SOFT_PENALTY_FLOOR 제거 — 이중 패널티 원인 해소로 불필요
     soft_penalty = (
         mtf_penalty *
         exhaustion_mult *
@@ -729,8 +744,8 @@ def calculate_entry_score(analysis: dict, direction: str,
         candle_momentum_mult *
         choch_penalty *
         bos_conflict_penalty *
-        ranging_bos_weak_penalty *
         explosive_bos_penalty
+        # ranging_bos_weak_penalty 제거됨 (BOS_CONFLICT_PENALTY_RANGING에 통합)
     )
     micro_penalty = micro_result.get("total_penalty", 0) if micro_result else 0
 
@@ -750,27 +765,48 @@ def calculate_entry_score(analysis: dict, direction: str,
             f"[BB스퀴즈임계/{d.upper()}] BB 스퀴즈 감지 → 임계값 +2pt = {regime_threshold}pt"
         )
 
-    # ── [v3.8 ㉘] RANGING 저ADX 임계값 동적 상향 ────────────────
-    #   15m RANGING에서 ADX가 낮을수록(노이즈) 임계 강화
+    # ── [v4.0 P3] RANGING 동적 임계 상향 — 합산 상한 적용 ────────
+    # BB스퀴즈(+2) + 저ADX(+4) + EMA역방향(+3) 합산 최대 DYNAMIC_CAP(+8)
+    # ADX역추세(EMA3역방향, +5~15)는 별도 블록 — 이 캡 미적용
     if regime_name == "RANGING":
+        _dynamic_boost = 0
+
+        # 저ADX 부스트
         _adx_ranging = adx_15m.get("adx", 25.0)
         if _adx_ranging < config.RANGING_LOW_ADX_THRESHOLD:
-            _ranging_adx_boost = min(
+            _adb = min(
                 config.RANGING_LOW_ADX_BOOST_CAP,
                 int((config.RANGING_LOW_ADX_THRESHOLD - _adx_ranging) / config.RANGING_LOW_ADX_DIVISOR)
             )
-            if _ranging_adx_boost > 0:
-                regime_threshold = min(
-                    config.RANGING_LOW_ADX_MAX_THRESHOLD,
-                    regime_threshold + _ranging_adx_boost
-                )
-                logger.info(
-                    f"[저ADX/RANGING/{d.upper()}] "
-                    f"ADX:{_adx_ranging:.0f}<{config.RANGING_LOW_ADX_THRESHOLD} "
-                    f"→ 임계 +{_ranging_adx_boost}pt = {regime_threshold}pt"
-                )
+            _dynamic_boost += _adb
 
-    # ── [v3.4] ADX 연동 역추세 임계값 조정 ──────────────────────
+        # EMA 역방향 부스트
+        if reverse_count >= config.RANGING_NO_BOS_EMA_REVERSE_MIN:
+            _dynamic_boost += config.RANGING_EMA_REVERSE_THRESHOLD_BOOST
+
+        # BB스퀴즈는 이미 위에서 +2 적용됨 — 합산 대상에 포함
+        if bb.get("squeeze", False):
+            _dynamic_boost += 2   # BB스퀴즈 기여분 포함해 상한 계산
+
+        # 합산 상한 적용
+        _dynamic_boost_capped = min(config.RANGING_THRESHOLD_DYNAMIC_CAP, _dynamic_boost)
+
+        # BB스퀴즈는 이미 위에서 적용됐으므로 추가 적용할 양은 전체에서 2를 뺀 값
+        _adx_ema_boost = max(0, _dynamic_boost_capped - (2 if bb.get("squeeze", False) else 0))
+
+        # 저ADX + EMA역방향 부스트 합산 적용 (BB스퀴즈 제외, 이미 적용됨)
+        if _adx_ema_boost > 0:
+            regime_threshold = min(config.RANGING_LOW_ADX_MAX_THRESHOLD,
+                                   regime_threshold + _adx_ema_boost)
+            _adx_val_log = adx_15m.get("adx", 0.0)
+            logger.info(
+                f"[RANGING동적임계/{d.upper()}] "
+                f"저ADX:{_adx_ranging:.0f} EMA역방향:{reverse_count}TF "
+                f"→ 합산+{_dynamic_boost}pt → 상한적용+{_adx_ema_boost}pt "
+                f"(캡:{config.RANGING_THRESHOLD_DYNAMIC_CAP}pt) = {regime_threshold}pt"
+            )
+
+    # ── [v3.4] ADX 연동 역추세 임계값 조정 (EMA3역방향 독립 블록) ─
     if ema_all_reverse and not bb_reversal_exempt:
         adx_val_ct = adx_15m.get("adx", 0.0)
         if   adx_val_ct >= config.ADX_COUNTER_TREND_THRESHOLD_STRONG:
@@ -800,6 +836,103 @@ def calculate_entry_score(analysis: dict, direction: str,
             f"FVG 양방향 + vol:{vol_score:.1f}pt < {config.FVG_AMBIGUOUS_VOL_THRESHOLD}pt "
             f"→ 신호 차단"
         )
+
+    # ── [v4.0 P2] RANGING + BOS없음 + EMA역방향≥2TF 하드필터 ────
+    # bos_same(방향일치BOS) → bos_any(BOS 자체 존재) 로 완화
+    # 근거: BOS 역방향이라도 구조 확인 상태 → BOS충돌패널티(×0.76)가 이미 적용됨
+    #       BOS 자체가 없는 구조 미확인 상태 + EMA 역방향 = 차단
+    if signal and regime_name == "RANGING":
+        _bos_any = (
+            bos_choch_data.get("bos_bullish") or bos_choch_data.get("bos_bearish")
+        )
+        _ema_rev_enough = (reverse_count >= config.RANGING_NO_BOS_EMA_REVERSE_MIN)
+        if _ema_rev_enough and not _bos_any:
+            signal = False
+            logger.info(
+                f"[RANGING_BOS필터/{d.upper()}] "
+                f"BOS구조 없음 + EMA역방향{reverse_count}TF → 신호 차단 "
+                f"(역방향BOS는 허용 — BOS충돌패널티로 소프트 처리)"
+            )
+
+    # ── [v4.0 P1] 유효 근거 필터 — 항목 확장 + 레짐별 최소 기준 ─
+    # 추세확인형(①~⑤) + 반전형(⑥~⑧) 혼합 — 양방향 진입 모두 유효
+    # 레짐별 최소: SQUEEZE=1개, RANGING=2개, 기타=2개
+    if signal:
+        _evidence = 0
+        # ── 추세확인형 ──────────────────────────────────────────
+        # ① EMA 방향 일치 ≥ 2TF
+        if ema_same >= 2:
+            _evidence += 1
+        # ② BOS 방향 확증
+        _bos_confirm = (
+            (d == "short" and bos_choch_data.get("bos_bearish")) or
+            (d == "long"  and bos_choch_data.get("bos_bullish"))
+        )
+        if _bos_confirm:
+            _evidence += 1
+        # ③ 히든 다이버전스 (방향 일치)
+        _hdiv = (
+            (d == "short" and rsi.get("hidden_bear_div")) or
+            (d == "long"  and rsi.get("hidden_bull_div"))
+        )
+        if _hdiv:
+            _evidence += 1
+        # ④ FVG 방향 일치 (단독)
+        _fvg_match = (
+            (d == "short" and bear_fvg and not bull_fvg) or
+            (d == "long"  and bull_fvg and not bear_fvg)
+        )
+        if _fvg_match:
+            _evidence += 1
+        # ⑤ 피보나치 황금포켓
+        _fib_gp = (
+            (d == "short" and fibonacci.get("in_golden_pocket_short")) or
+            (d == "long"  and fibonacci.get("in_golden_pocket_long"))
+        )
+        if _fib_gp:
+            _evidence += 1
+
+        # ── [v4.0 P1] 반전형 항목 추가 ─────────────────────────
+        # ⑥ 멀티TF 극단 과매도/과매수 (반전형 롱/숏 핵심 근거)
+        if is_extreme_oversold or is_extreme_overbought:
+            _evidence += 1
+        # ⑦ 대규모 청산꼬리 방향 일치 (liq_large + 방향 일치)
+        _liq_ev = (
+            liq.get("is_large", False) and (
+                (d == "long"  and liq.get("signal") == "long_liq_detected") or
+                (d == "short" and liq.get("signal") == "short_liq_detected")
+            )
+        )
+        if _liq_ev:
+            _evidence += 1
+        # ⑧ BB 극단 + RSI 다이버전스 (반전형 타이밍 근거)
+        _bb_rsi_div = (bb_extreme and has_div and _div_rsi_ok)
+        if _bb_rsi_div:
+            _evidence += 1
+
+        # 레짐별 최소 기준
+        if regime_name == "SQUEEZE":
+            _min_ev = config.SIGNAL_MIN_EVIDENCE_SQUEEZE   # 1
+        elif regime_name == "RANGING":
+            _min_ev = config.SIGNAL_MIN_EVIDENCE_RANGING   # 2
+        else:
+            _min_ev = config.SIGNAL_MIN_EVIDENCE_DEFAULT   # 2
+
+        if _evidence < _min_ev:
+            signal = False
+            logger.info(
+                f"[근거부족필터/{d.upper()}] [{regime_name}] "
+                f"유효근거 {_evidence}개 < {_min_ev}개 → 신호 차단 "
+                f"(EMA≥2:{ema_same>=2}, BOS:{_bos_confirm}, HDiv:{_hdiv}, "
+                f"FVG:{_fvg_match}, Fib:{_fib_gp}, "
+                f"극단:{is_extreme_oversold or is_extreme_overbought}, "
+                f"청산:{_liq_ev}, BB+RSI다이버:{_bb_rsi_div})"
+            )
+        else:
+            logger.info(
+                f"[근거필터/{d.upper()}] ✅ [{regime_name}] 유효근거 {_evidence}개 통과 "
+                f"(최소:{_min_ev}개)"
+            )
 
     # ── 로그 ─────────────────────────────────────────────────────
     micro_note   = f" +micro{micro_penalty:+d}pt" if micro_penalty != 0 else ""
@@ -839,7 +972,7 @@ def calculate_entry_score(analysis: dict, direction: str,
     breakdown = _build_breakdown(
         d, scores, weights, raw_score, ema_mult, gate_penalty,
         mtf_penalty, exhaustion_mult, choch_penalty, bos_conflict_penalty,
-        explosive_bos_penalty, candle_momentum_mult, ranging_bos_weak_penalty,
+        explosive_bos_penalty, candle_momentum_mult,
         bonuses, bonus_cap, final_score,
         gate, regime, micro_penalty, volume_penalty
     )
@@ -856,14 +989,13 @@ def calculate_entry_score(analysis: dict, direction: str,
         "candle_momentum_mult": candle_momentum_mult, "choch_penalty": choch_penalty,
         "bos_conflict_penalty": bos_conflict_penalty,
         "explosive_bos_penalty": explosive_bos_penalty,
-        "ranging_bos_weak_penalty": ranging_bos_weak_penalty,
         "volume_penalty": volume_penalty,
     }
 
 
 def _build_breakdown(d, scores, weights, raw, ema_m, pen,
                      mtf_m, exh_m, choch_m, bos_m, exp_bos_m,
-                     candle_m, ranging_bos_m,
+                     candle_m,
                      bonuses, bonus_cap, final, gate, regime,
                      micro_penalty=0, volume_penalty=0) -> str:
     label = "🟢 롱" if d == "long" else "🔴 숏"
@@ -881,8 +1013,7 @@ def _build_breakdown(d, scores, weights, raw, ema_m, pen,
     if candle_m     < 1.0: lines.append(f"  캔들모멘텀 역방향 패널티  × {candle_m:.2f}")
     if choch_m     < 1.0: lines.append(f"  CHoCH 역방향 패널티     × {choch_m:.2f}")
     if bos_m       < 1.0: lines.append(f"  BOS 역방향 패널티       × {bos_m:.2f}")
-    if exp_bos_m     < 1.0: lines.append(f"  EXPLOSIVE+BOS 강화패널티  × {exp_bos_m:.2f}")
-    if ranging_bos_m < 1.0: lines.append(f"  저ADX+BOS역방향 추가패널티× {ranging_bos_m:.2f}")
+    if exp_bos_m   < 1.0: lines.append(f"  EXPLOSIVE+BOS 강화패널티  × {exp_bos_m:.2f}")
     if bonuses:
         lines.append(f"  보너스 (상한:{bonus_cap}pt):")
         for name, val in bonuses:
