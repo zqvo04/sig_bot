@@ -92,12 +92,20 @@ VOLUME_EXPLOSION_MULTIPLIER = 2.0
 # ══════════════════════════════════════════════════════════════
 # EMA 배율
 # ══════════════════════════════════════════════════════════════
-EMA_MULTIPLIER = {3: 0.52, 2: 0.72, 1: 0.88, 0: 1.00}
+# [v5.0] 헬퍼 함수로 통합: 16개 독립 값 → 4개 파라미터 세트
+#   _ema_table(m3, m2, m1): 역방향 3/2/1개 시 배율, 0개는 항상 1.00
+#   읽기 규칙: m3(가장 강한 페널티) > m2 > m1, 모두 ≤ 1.00
+#   기존 16개 수치 전부 동일하게 유지 — 동작 변화 없음
+def _ema_table(m3: float, m2: float, m1: float) -> dict:
+    assert 0 < m3 <= m2 <= m1 <= 1.00, f"EMA 배율 단조성 위반: {m3}/{m2}/{m1}"
+    return {0: 1.00, 1: m1, 2: m2, 3: m3}
 
-EMA_MULTIPLIER_RANGING   = {3: 0.82, 2: 0.90, 1: 0.96, 0: 1.00}
-EMA_MULTIPLIER_TRENDING  = {3: 0.52, 2: 0.72, 1: 0.88, 0: 1.00}
-EMA_MULTIPLIER_EXPLOSIVE = {3: 0.75, 2: 0.84, 1: 0.93, 0: 1.00}
-EMA_MULTIPLIER_SQUEEZE   = {3: 0.80, 2: 0.87, 1: 0.95, 0: 1.00}
+#                          3역방향  2역방향  1역방향
+EMA_MULTIPLIER           = _ema_table(0.52,   0.72,   0.88)  # TRENDING 기본값
+EMA_MULTIPLIER_RANGING   = _ema_table(0.82,   0.90,   0.96)  # 횡보: 역추세 허용
+EMA_MULTIPLIER_TRENDING  = _ema_table(0.52,   0.72,   0.88)  # 추세: 역추세 강 페널티
+EMA_MULTIPLIER_EXPLOSIVE = _ema_table(0.75,   0.84,   0.93)  # 폭발: 중간 페널티
+EMA_MULTIPLIER_SQUEEZE   = _ema_table(0.80,   0.87,   0.95)  # 스퀴즈: 방향 불확실, 완화
 
 REGIME_EMA_MULTIPLIERS = {
     "RANGING":   EMA_MULTIPLIER_RANGING,
@@ -197,6 +205,26 @@ REGIME_SCORE_WEIGHTS = {
     "SQUEEZE":   SCORE_WEIGHTS_SQUEEZE,
     "UNKNOWN":   SCORE_WEIGHTS,
 }
+
+# ══════════════════════════════════════════════════════════════
+# [v5.0] Fuzzy 레짐 블렌딩 파라미터
+# ──────────────────────────────────────────────────────────────
+# ADX 경계(25pt) ±BLEND_WIDTH 구간에서 RANGING↔TRENDING 가중치 선형 블렌딩.
+# confidence=0(경계 정중앙) 시 임계값 최대 +THRESHOLD_BOOST pt 상향.
+REGIME_BLEND_WIDTH_ADX            = 5.0  # ADX ±5 = 20~30 구간에서 블렌딩
+REGIME_BLEND_WIDTH_BW             = 0.10 # bw_ratio ±0.10 구간에서 TRENDING↔EXPLOSIVE 블렌딩
+REGIME_CONFIDENCE_THRESHOLD_BOOST = 3    # 경계 중심(confidence=0)에서 최대 +3pt 임계 상향
+
+# ══════════════════════════════════════════════════════════════
+# [v5.0] RSI-BB 지표 융합 파라미터
+# ──────────────────────────────────────────────────────────────
+# ① Taker-조건부 RSI/BB 억제: Taker가 역방향으로 강할 때 포지션 기반 점수 약화.
+# ② 기하평균 융합: RSI와 BB 두 지표 모두 강할 때만 높은 합산 허용.
+# ③ Ensemble 투표: 6개 지표의 방향 합의 카운터로 보너스/패널티.
+RSI_BB_TAKER_SUPPRESS_THRESHOLD = 0.60  # Taker 역방향 억제 시작 임계 (매도비율 ≥ 이 값)
+RSI_BB_TAKER_SUPPRESS_MAX       = 0.50  # 억제 최소 계수 (50% 중립화 하한)
+RSI_BB_INTERACT_THRESHOLD       = 68    # 교호작용 보너스 발동 기준 점수
+RSI_BB_INTERACT_MAX             = 6     # 교호작용 보너스 최대값 (pt)
 
 # ══════════════════════════════════════════════════════════════
 # 보너스 체계
