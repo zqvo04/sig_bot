@@ -1,9 +1,17 @@
 """
-scoring_system.py — 점수 산출 (v4.0) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
+scoring_system.py — 점수 산출 (v5.0) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
 ────────────────────────────────────────────────────────────────────
 ⚠️ 이 코드는 15분봉(15m entry) 시그봇 전용입니다. 1시간봉 버전과 혼동 금지.
    모든 진입 점수 산출은 15분봉 기준. 1h/4h는 MTF-RSI 페널티 참조용.
 ────────────────────────────────────────────────────────────────────
+[v5.0 추가]
+
+★ Fuzzy 레짐 가중치: regime.blended_weights 우선 사용 (경계 구간 선형 블렌딩)
+★ Fuzzy 임계 보정: regime.threshold_adj 적용 (경계 불확실성 → 최대 +3pt)
+★ RSI-BB Taker-조건부 억제: Taker 역방향≥0.60 시 RSI/BB 포지션 점수 약화
+★ RSI-BB 기하평균 융합: 두 지표 같은 방향이면 GM 적용, 반대면 중립화
+★ Ensemble 투표 보너스(⑯): 6지표 방향 합의 강도 → 보너스/패널티 ±3~8pt
+
 [v4.0 추가] ← 과적합 방지 전면 개선 (양방향 설계)
 
 P1. 근거필터 반전형 항목 확장 (⑥멀티TF극단 ⑦청산꼬리 ⑧BB극단+RSI다이버전스)
@@ -83,7 +91,9 @@ def calculate_entry_score(analysis: dict, direction: str,
     }
 
     regime_name = regime.get("regime", "UNKNOWN")
-    weights     = config.REGIME_SCORE_WEIGHTS.get(regime_name, config.SCORE_WEIGHTS)
+    # [v5.0] Fuzzy 블렌딩 가중치 우선 사용 (경계 구간 시 선형 블렌딩)
+    weights = (regime.get("blended_weights") or
+               config.REGIME_SCORE_WEIGHTS.get(regime_name, config.SCORE_WEIGHTS))
 
     # EMA 3역방향 시 LS 중립화
     bb_reversal_exempt = (
@@ -130,6 +140,65 @@ def calculate_entry_score(analysis: dict, direction: str,
         if not _ls_already_bad:
             scores["long_short_ratio"] = 50.0
             logger.info(f"[BOS역방향/A] LS 중립화: {_ls_s:.0f}→50pt [{d.upper()}]")
+
+    # ── [v5.0] ① Taker-조건부 RSI/BB 억제 ──────────────────────────
+    # RSI·BB는 "가격 위치" 기반 점수라 방향성 근거(Taker) 없이도 높아짐.
+    # Taker가 역방향으로 강할 때 RSI/BB의 반전 기대치를 약화시켜 이중계산 방지.
+    _taker_buy_r  = taker.get("buy_ratio",  0.5)
+    _taker_sell_r = taker.get("sell_ratio", 0.5)
+    _sup_thr  = config.RSI_BB_TAKER_SUPPRESS_THRESHOLD   # 0.60
+    _sup_max  = config.RSI_BB_TAKER_SUPPRESS_MAX          # 0.50
+    _sup_rng  = 1.0 - _sup_thr                            # 0.40
+
+    if d == "long" and _taker_sell_r >= _sup_thr:
+        _factor = max(_sup_max, 1.0 - (_taker_sell_r - _sup_thr) / _sup_rng * (1.0 - _sup_max))
+        _rsi_orig, _bb_orig = scores["rsi"], scores["bollinger"]
+        scores["rsi"]       = round(50.0 + (scores["rsi"]       - 50.0) * _factor, 2)
+        scores["bollinger"] = round(50.0 + (scores["bollinger"] - 50.0) * _factor, 2)
+        logger.info(
+            f"[RSI/BB억제/롱] 매도Taker:{_taker_sell_r:.2f}≥{_sup_thr} "
+            f"RSI {_rsi_orig:.0f}→{scores['rsi']:.0f} "
+            f"BB {_bb_orig:.0f}→{scores['bollinger']:.0f} (×{_factor:.2f})"
+        )
+    elif d == "short" and _taker_buy_r >= _sup_thr:
+        _factor = max(_sup_max, 1.0 - (_taker_buy_r - _sup_thr) / _sup_rng * (1.0 - _sup_max))
+        _rsi_orig, _bb_orig = scores["rsi"], scores["bollinger"]
+        scores["rsi"]       = round(50.0 + (scores["rsi"]       - 50.0) * _factor, 2)
+        scores["bollinger"] = round(50.0 + (scores["bollinger"] - 50.0) * _factor, 2)
+        logger.info(
+            f"[RSI/BB억제/숏] 매수Taker:{_taker_buy_r:.2f}≥{_sup_thr} "
+            f"RSI {_rsi_orig:.0f}→{scores['rsi']:.0f} "
+            f"BB {_bb_orig:.0f}→{scores['bollinger']:.0f} (×{_factor:.2f})"
+        )
+
+    # ── [v5.0] ② RSI-BB 기하평균 융합 (이중계산 방지) ───────────────
+    # RSI·BB는 동일 가격 데이터 기반 → 상관관계 높음.
+    # 기하평균: 둘 다 강해야 합산 유지, 한쪽이 약하면 자연스럽게 억제.
+    _rsi_sig = scores["rsi"]       / 100.0 - 0.5   # -0.5 ~ +0.5
+    _bb_sig  = scores["bollinger"] / 100.0 - 0.5   # -0.5 ~ +0.5
+
+    if _rsi_sig * _bb_sig > 0:
+        # 같은 방향: 기하평균으로 이중계산 완화
+        import math
+        _fused_mag = math.sqrt(abs(_rsi_sig) * abs(_bb_sig))
+        _fused_dir = 1.0 if _rsi_sig > 0 else -1.0
+        _fused_score = round((0.5 + _fused_dir * _fused_mag) * 100.0, 2)
+        _fused_score = max(0.0, min(100.0, _fused_score))
+        if abs(_fused_score - scores["rsi"]) >= 3 or abs(_fused_score - scores["bollinger"]) >= 3:
+            logger.info(
+                f"[RSI-BB융합/{d.upper()}] RSI:{scores['rsi']:.0f} BB:{scores['bollinger']:.0f} "
+                f"→ GM:{_fused_score:.0f}pt"
+            )
+        scores["rsi"]       = _fused_score
+        scores["bollinger"] = _fused_score
+    elif _rsi_sig * _bb_sig < 0:
+        # 반대 방향: RSI·BB 의견 불일치 → 중립화
+        logger.info(
+            f"[RSI-BB방향불일치/{d.upper()}] RSI:{scores['rsi']:.0f} BB:{scores['bollinger']:.0f} "
+            f"→ 중립화 50pt"
+        )
+        scores["rsi"]       = 50.0
+        scores["bollinger"] = 50.0
 
     raw_score = sum(scores[k] * weights[k] for k in weights)
 
@@ -559,6 +628,33 @@ def calculate_entry_score(analysis: dict, direction: str,
              config.BONUS_POST_SQUEEZE)
         )
 
+    # ⑯ [v5.0] ③ Ensemble 방향 합의 투표 보너스/패널티
+    # 6개 지표(RSI-BB융합 후)를 독립 신호로 처리: 방향 합의 강도 측정.
+    # STRONG(score≥72)=+2, LEAN(≥58)=+1, NEUTRAL(42~58)=0,
+    # LEAN_AGAINST(≤42)=-1, STRONG_AGAINST(≤28)=-2
+    def _vote(s: float) -> int:
+        if s >= 72: return 2
+        if s >= 58: return 1
+        if s <= 28: return -2
+        if s <= 42: return -1
+        return 0
+    _vote_tally = sum(_vote(v) for v in scores.values())  # -12 ~ +12
+    if _vote_tally >= 7:
+        _vb = min(6, (_vote_tally - 6) * 2)
+        bonuses.append((f"강한합의({_vote_tally}/12)", _vb))
+        logger.info(f"[Ensemble/{d.upper()}] 강한 합의 투표:{_vote_tally}/12 → +{_vb}pt")
+    elif _vote_tally >= 5:
+        bonuses.append((f"합의({_vote_tally}/12)", 3))
+        logger.info(f"[Ensemble/{d.upper()}] 합의 투표:{_vote_tally}/12 → +3pt")
+    elif _vote_tally <= -3:
+        _vp = max(-8, _vote_tally * 2)
+        bonuses.append((f"지표분열({_vote_tally}/12)", _vp))
+        logger.info(
+            f"[Ensemble/{d.upper()}] 지표분열 투표:{_vote_tally}/12 → {_vp}pt "
+            f"RSI:{scores['rsi']:.0f} BB:{scores['bollinger']:.0f} "
+            f"Taker:{scores['taker_volume']:.0f} Funding:{scores['funding_rate']:.0f}"
+        )
+
     # ── 소진 상태에서 추세확인형 보너스 제거 ────────────────────
     if exhaustion_mult < 1.0:
         tc = {"LowerHigh구조","HigherLow구조","거래량약세다이버전스","거래량강세다이버전스",
@@ -757,6 +853,15 @@ def calculate_entry_score(analysis: dict, direction: str,
 
     # ── 임계값 결정 ──────────────────────────────────────────────
     regime_threshold = regime.get("threshold", config.REGIME_THRESHOLDS.get("TRENDING", 63))
+
+    # [v5.0] Fuzzy 경계 불확실성 보정: ADX 경계 중심에서 최대 +3pt
+    _fuzzy_adj = regime.get("threshold_adj", 0)
+    if _fuzzy_adj > 0:
+        regime_threshold += _fuzzy_adj
+        logger.info(
+            f"[Fuzzy임계/{d.upper()}] confidence:{regime.get('regime_confidence',1.0):.2f} "
+            f"→ 임계값 +{_fuzzy_adj}pt = {regime_threshold}pt"
+        )
 
     # ── [v3.5 개선③] BB 스퀴즈 감지 시 임계값 +2pt 상향 ─────────
     if bb.get("squeeze", False) and regime_threshold < 66:
