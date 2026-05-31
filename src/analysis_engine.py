@@ -1,17 +1,27 @@
 """
-analysis_engine.py — 분석 엔진 (v3.8) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
+analysis_engine.py — 분석 엔진 (v5.0) [TARGET: 15분봉 시그봇 / 15-MINUTE SIGBOT]
 ────────────────────────────────────────────────────────────────────
 ⚠️ 이 코드는 15분봉(15m entry) 시그봇 전용입니다. 1시간봉 버전과 혼동 금지.
    진입 판정(RSI/BB/EMA/레짐)은 모두 15분봉. 1h/4h는 MTF-RSI 참조용.
 ────────────────────────────────────────────────────────────────────
+[v5.0 변경]
+
+★ analyze_mtf_rsi: 눌림목 미세(plm/psm) 조건 재설계
+  기존 v3.8: plm 유효 1h 범위 (51,52]=1pt 밴드, psm [48,49)=1pt 밴드 → 노이즈 수준
+  개선 v5.0: plm 유효 1h 범위 (52,54]=2pt 밴드, psm [46,48)=2pt 밴드
+  15m 조건도 완화: plm 15m<44 (기존 <40), psm 15m>56 (기존 >60)
+  XRP/HYPE 불량신호 보호 유지: plm 1h>52 요구, psm 1h<48 요구
+
+★ classify_market_regime: Fuzzy 소프트 경계 블렌딩 도입
+  ADX 경계(25pt) ±5 구간에서 RANGING↔TRENDING 가중치 선형 블렌딩.
+  TRENDING↔EXPLOSIVE 경계(ADX=40, bw=1.2)도 동일 적용.
+  confidence 낮을수록(경계 근처) 임계값 최대 +3pt 자동 상향.
+
 [v3.8 변경] ← 어제(2026-05-28~29) 불량신호 대응
 
 ★ analyze_mtf_rsi: 눌림목 미세(plm/psm) 조건 강화
-  근거: 15분봉에서 "1h RSI < 52"는 중립 수준 → 노이즈와 구분 불가.
-        XRP 15:30(1h=49,15m=60), HYPE 16:30(1h=50,15m=58) 불량신호 원인.
   숏 미세(psm): 1h<52,15m>58  →  1h<49,15m>60  (상위TF 하락 바이어스 명확화)
   롱 미세(plm): 1h>48,15m<42  →  1h>51,15m<40  (대칭 강화)
-  효과: XRP 15:30 / HYPE 16:30 의 눌림목미세(+4pt) 보너스 차단.
 
 [v3.5 변경]
 ★ check_volume_confirmation: 거래량 baseline = 1h 캔들 120개 평균 / 4
@@ -178,19 +188,27 @@ def analyze_mtf_rsi(df_15m, df_1h, df_4h):
     long_score_raw,short_score_raw=_rsi_to_score(v_weighted)
 
     # ── 눌림목 롱 ───────────────────────────────────────────────
-    pls=(v_1h is not None and v_1h>58 and v_15m is not None and v_15m<40)
-    plw=(v_1h is not None and v_1h>52 and v_15m is not None and v_15m<44 and not pls)
-    # [v3.8] 눌림목 미세 롱 조건 강화: 1h>51,15m<40 (구:1h>48,15m<42)
-    #   15분봉에서 1h가 중립(50) 초과로 명확히 상승 바이어스일 때만 눌림목 인정
-    plm=(v_1h is not None and v_1h>51 and v_15m is not None and v_15m<40 and not pls and not plw)
+    # 강: 1h 상승 바이어스 명확(>58) + 15m 과매도 깊은 눌림(<42)
+    pls=(v_1h is not None and v_1h>58 and v_15m is not None and v_15m<42)
+    # 약: 1h 중간 상승 바이어스(54~58) + 15m 중간 눌림(<46)
+    plw=(v_1h is not None and v_1h>54 and v_15m is not None and v_15m<46 and not pls)
+    # [v5.0] 미세 재설계: 1h 약한 상승 바이어스(52~54) + 15m 적당한 눌림(<44)
+    #   구조: plw 상한(>54) 미만, pls 하한(>58) 미만 → 유효 1h 범위 (52, 54] = 2pt 밴드
+    #   기존 v3.8: v_1h>51 AND not plw(>52) → 유효 범위 (51, 52] = 1pt 밴드 (노이즈 수준)
+    #   XRP/HYPE 불량신호 보호 유지: plm은 1h>52 요구 → 1h=49/50 여전히 차단됨
+    plm=(v_1h is not None and v_1h>52 and v_15m is not None and v_15m<44 and not pls and not plw)
     pl=pls or plw or plm
 
-    # ── 눌림목 숏 ───────────────────────────────────────────────
-    pss=(v_1h is not None and v_1h<42 and v_15m is not None and v_15m>60)
-    psw=(v_1h is not None and v_1h<48 and v_15m is not None and v_15m>56 and not pss)
-    # [v3.8] 눌림목 미세 숏 조건 강화: 1h<49,15m>60 (구:1h<52,15m>58)
-    #   15분봉에서 1h가 중립(50) 미만으로 명확히 하락 바이어스일 때만 눌림목 인정
-    psm=(v_1h is not None and v_1h<49 and v_15m is not None and v_15m>60 and not pss and not psw)
+    # ── 눌림목 숏 (롱과 대칭) ───────────────────────────────────
+    # 강: 1h 하락 바이어스 명확(<42) + 15m 과매수 깊은 반등(>58)
+    pss=(v_1h is not None and v_1h<42 and v_15m is not None and v_15m>58)
+    # 약: 1h 중간 하락 바이어스(42~46) + 15m 중간 반등(>54)
+    psw=(v_1h is not None and v_1h<46 and v_15m is not None and v_15m>54 and not pss)
+    # [v5.0] 미세 재설계: 1h 약한 하락 바이어스(46~48) + 15m 적당한 반등(>56)
+    #   구조: psw 하한(<46) 초과, pss 상한(<42) 초과 → 유효 1h 범위 [46, 48) = 2pt 밴드
+    #   기존 v3.8: v_1h<49 AND not psw(<48) → 유효 범위 [48, 49) = 1pt 밴드 (노이즈 수준)
+    #   XRP/HYPE 불량신호 보호 유지: psm은 1h<48 요구 → 1h=49/50 여전히 차단됨
+    psm=(v_1h is not None and v_1h<48 and v_15m is not None and v_15m>56 and not pss and not psw)
     ps=pss or psw or psm
 
     macro_bull=v_4h is not None and v_4h>52
@@ -461,9 +479,16 @@ def analyze_liquidations(liq_data, df_15m=None):
             "short_liq_proxy":round(short_liq_score,4),"favorable_direction":fav_dir,"display_hint":display_hint,"available":True}
 
 
+def _blend_weights(w_a: dict, m_a: float, w_b: dict, m_b: float) -> dict:
+    """두 가중치 딕셔너리를 멤버십 비율로 선형 블렌딩 (합=1 보장)"""
+    total = m_a + m_b
+    return {k: (w_a[k] * m_a + w_b[k] * m_b) / total for k in w_a}
+
+
 def classify_market_regime(df_15m, adx, bb):
     if df_15m is None or len(df_15m)<25 or not bb.get("available"):
-        return {"regime":"UNKNOWN","threshold":63,"description":"데이터 부족","icon":"❓"}
+        return {"regime":"UNKNOWN","threshold":63,"description":"데이터 부족","icon":"❓",
+                "blended_weights":None,"regime_confidence":1.0,"threshold_adj":0}
     adx_val=adx.get("adx",0.0); bw=bb.get("band_width",0.0); avg_bw=bb.get("avg_band_width",bw)
     squeeze=bb.get("squeeze",False); bw_ratio=bw/avg_bw if avg_bw>0 else 1.0
     ma20_cross_count=0; efficiency_ratio=1.0
@@ -491,10 +516,55 @@ def classify_market_regime(df_15m, adx, bb):
     else:
         regime="RANGING"; desc=f"ADX낮음({adx_val:.0f})+BB평행 — 박스권 횡보"; icon="↔️"
     threshold=config.REGIME_THRESHOLDS.get(regime,63)
-    logger.info(f"[국면] {icon} {regime} — {desc} (임계값:{threshold}pt)")
+
+    # ── [v5.0] Fuzzy 레짐 경계 블렌딩 ──────────────────────────────
+    # RANGING↔TRENDING 경계(ADX=25) ±5pt 구간에서 가중치 선형 블렌딩.
+    # 경계 중심일수록 confidence 낮아지고 임계값 최대 +3pt 상향.
+    regime_confidence = 1.0
+    blended_weights   = None
+    W = config.REGIME_BLEND_WIDTH_ADX  # 5.0
+
+    if regime in ("RANGING", "TRENDING") and not squeeze:
+        dist = abs(adx_val - config.REGIME_TREND_ADX)
+        if dist < W:
+            t = (adx_val - (config.REGIME_TREND_ADX - W)) / (2.0 * W)
+            t = max(0.0, min(1.0, t))
+            blended_weights = _blend_weights(
+                config.SCORE_WEIGHTS_RANGING,  1.0 - t,
+                config.SCORE_WEIGHTS_TRENDING, t
+            )
+            regime_confidence = 2.0 * abs(t - 0.5)  # 0(경계 중심) ~ 1(확실)
+            logger.info(
+                f"[Fuzzy레짐] RANGING({1-t:.2f}) ↔ TRENDING({t:.2f}) "
+                f"ADX:{adx_val:.1f} confidence:{regime_confidence:.2f}"
+            )
+
+    elif regime in ("TRENDING", "EXPLOSIVE") and not squeeze:
+        adx_dist = abs(adx_val - config.REGIME_STRONG_ADX)
+        bw_dist  = abs(bw_ratio - 1.2)
+        if adx_dist < W and bw_dist < config.REGIME_BLEND_WIDTH_BW:
+            t_adx = (adx_val - (config.REGIME_STRONG_ADX - W)) / (2.0 * W)
+            t_bw  = (bw_ratio - (1.2 - config.REGIME_BLEND_WIDTH_BW)) / (2.0 * config.REGIME_BLEND_WIDTH_BW)
+            t = max(0.0, min(1.0, (t_adx + t_bw) / 2.0))
+            blended_weights = _blend_weights(
+                config.SCORE_WEIGHTS_TRENDING,  1.0 - t,
+                config.SCORE_WEIGHTS_EXPLOSIVE, t
+            )
+            regime_confidence = 2.0 * abs(t - 0.5)
+            logger.info(
+                f"[Fuzzy레짐] TRENDING({1-t:.2f}) ↔ EXPLOSIVE({t:.2f}) "
+                f"ADX:{adx_val:.1f} bw:{bw_ratio:.2f} confidence:{regime_confidence:.2f}"
+            )
+
+    threshold_adj = round((1.0 - regime_confidence) * config.REGIME_CONFIDENCE_THRESHOLD_BOOST)
+
+    logger.info(f"[국면] {icon} {regime} — {desc} (임계값:{threshold}pt"
+                + (f" +fuzzy_adj:{threshold_adj}pt" if threshold_adj > 0 else "") + ")")
     return {"regime":regime,"threshold":threshold,"description":desc,"icon":icon,
             "adx":adx_val,"bw_ratio":round(bw_ratio,3),"squeeze":squeeze,
-            "ma20_cross_count":ma20_cross_count,"efficiency_ratio":efficiency_ratio}
+            "ma20_cross_count":ma20_cross_count,"efficiency_ratio":efficiency_ratio,
+            "blended_weights":blended_weights,"regime_confidence":round(regime_confidence,3),
+            "threshold_adj":threshold_adj}
 
 
 def evaluate_gates(direction, funding, ls_ratio_result):
