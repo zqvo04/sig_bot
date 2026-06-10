@@ -4,8 +4,6 @@ name: ORTHO Resolver (채점 5m)
 # WIN/LOSS/TIMEOUT 판정한다. 신호 생성과 독립. 알림 ON/OFF와 무관하게 항상 동작.
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 concurrency:
