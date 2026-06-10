@@ -96,6 +96,7 @@ def _parse(page):
         return {
             "page_id": page.get("id"),
             "symbol": _p_sel(p.get("Symbol")),
+            "polarity": _p_sel(p.get("Polarity")),
             "direction": (_p_sel(p.get("Direction")) or "").lower(),
             "entry": _p_num(p.get("Entry")), "tp": _p_num(p.get("TP")),
             "sl": _p_num(p.get("SL")), "r_dist": _p_num(p.get("R Dist")),
@@ -137,6 +138,28 @@ def query_open(limit=None):
     except Exception as e:
         logger.error(f"[notion] ❌ OPEN 조회 예외: {e}")
     return out
+
+
+# ── 중복 진입 차단 인덱스 (신호 생성기) ──────────────────────────
+def open_index() -> dict:
+    """현재 OPEN 신호를 색인해 중복/과밀 진입을 차단한다 (1회 쿼리).
+      keys      : {(symbol, polarity, direction)} — 동일 셋업 OPEN 여부
+      dir_count : {(symbol, direction): 건수}      — 방향별 슬롯(MAX_POS_DIR)
+    동일 셋업이 이미 OPEN이면 해소(WIN/LOSS/TIMEOUT) 전까지 재진입 금지 →
+    같은 시장상황에서 15분마다 같은 신호가 중복 적재되는 것을 막는다.
+    """
+    idx = {"keys": set(), "dir_count": {}}
+    if not enabled():
+        return idx
+    for r in query_open():
+        sym = r.get("symbol")
+        dr  = (r.get("direction") or "").lower()
+        pol = r.get("polarity") or ""
+        if not sym or not dr:
+            continue
+        idx["keys"].add((sym, pol, dr))
+        idx["dir_count"][(sym, dr)] = idx["dir_count"].get((sym, dr), 0) + 1
+    return idx
 
 
 # ── 판정 UPDATE ───────────────────────────────────────────────────

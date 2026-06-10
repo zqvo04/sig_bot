@@ -33,18 +33,35 @@ def setup_logging():
     return logging.getLogger("ortho.main")
 
 
-def process_symbol(exchange, symbol: str, logger) -> int:
-    """한 심볼 평가·기록·알림. 발생 신호 수 반환."""
+def process_symbol(exchange, symbol: str, open_idx: dict, logger) -> int:
+    """한 심볼 평가·기록·알림. 발생 신호 수 반환.
+    open_idx(현재 OPEN 색인)로 중복 셋업·슬롯 초과를 차단해 과적재를 막는다."""
     try:
         context = od.collect_context(exchange, symbol)
         signals = engine.evaluate(exchange, symbol, context)
         if not signals:
             logger.info(f"[{symbol}] 신호 없음")
             return 0
+        logged = 0
         for sig in signals:
-            notion.log_signal(sig)        # 항상 기록
+            sym = sig["symbol"]
+            dr  = (sig.get("direction") or "").lower()
+            pol = sig["polarity"]
+            # ① 동일 셋업이 이미 OPEN → 해소 전까지 재진입 금지(중복 적재 차단)
+            if (sym, pol, dr) in open_idx["keys"]:
+                logger.info(f"[{sym}] {pol} {dr.upper()} 이미 OPEN — 중복 스킵")
+                continue
+            # ② 방향별 동시 슬롯(MAX_POS_DIR) 초과 → 스킵
+            if open_idx["dir_count"].get((sym, dr), 0) >= oc.MAX_POS_DIR:
+                logger.info(f"[{sym}] {dr.upper()} 슬롯 {oc.MAX_POS_DIR} 초과 — 스킵")
+                continue
+            notion.log_signal(sig)        # 기록
             notify.notify_signal(sig)     # ALERT_ENABLED=true 일 때만 발송
-        return len(signals)
+            # 같은 실행 내 다른 심볼/폴라리티와의 중복도 막도록 색인 갱신
+            open_idx["keys"].add((sym, pol, dr))
+            open_idx["dir_count"][(sym, dr)] = open_idx["dir_count"].get((sym, dr), 0) + 1
+            logged += 1
+        return logged
     except Exception as e:
         logger.error(f"[{symbol}] 처리 오류: {e}\n{traceback.format_exc()}")
         return 0
@@ -62,9 +79,13 @@ def main():
     single = os.getenv("SINGLE_SYMBOL", "").strip()
     symbols = [single] if single else oc.SYMBOLS
 
+    # 현재 OPEN 색인 1회 로드 → 중복 셋업·슬롯 초과 진입 차단(과적재 방지)
+    open_idx = notion.open_index()
+    logger.info(f"   기존 OPEN: {len(open_idx['keys'])}건 (중복 진입 차단 기준)")
+
     total = 0
     for sym in symbols:
-        total += process_symbol(exchange, sym, logger)
+        total += process_symbol(exchange, sym, open_idx, logger)
 
     mode = "알림ON" if oc.ALERT_ENABLED else "학습기간(알림OFF)"
     logger.info("-" * 55)
