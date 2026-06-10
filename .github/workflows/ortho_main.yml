@@ -4,8 +4,6 @@ name: ORTHO Signal Bot (15m)
 # ALERT_ENABLED=true 일 때만 텔레그램 알림을 보낸다. 실주문 없음.
 
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 concurrency:
