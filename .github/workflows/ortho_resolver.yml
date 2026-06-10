@@ -1,0 +1,40 @@
+name: ORTHO Resolver (채점 5m)
+
+# ORTHO 가상신호 채점기. 5분마다 Notion의 OPEN 가상신호를 OKX 실제 가격으로
+# WIN/LOSS/TIMEOUT 판정한다. 신호 생성과 독립. 알림 ON/OFF와 무관하게 항상 동작.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ortho-resolver
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve open paper signals
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ORTHO resolver
+        env:
+          OKX_API_KEY:        ${{ secrets.OKX_API_KEY }}
+          OKX_API_SECRET:     ${{ secrets.OKX_API_SECRET }}
+          OKX_PASSPHRASE:     ${{ secrets.OKX_PASSPHRASE }}
+          NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: python src/ortho_resolver.py

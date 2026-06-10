@@ -1,0 +1,48 @@
+name: ORTHO Signal Bot (15m)
+
+# ORTHO-3 단독 가상매매 봇. 15분마다 6심볼을 평가해 Notion에 가상기록하고,
+# ALERT_ENABLED=true 일 때만 텔레그램 알림을 보낸다. 실주문 없음.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ortho-signal
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: ORTHO evaluate & record
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ORTHO bot
+        env:
+          OKX_API_KEY:        ${{ secrets.OKX_API_KEY }}
+          OKX_API_SECRET:     ${{ secrets.OKX_API_SECRET }}
+          OKX_PASSPHRASE:     ${{ secrets.OKX_PASSPHRASE }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          # ── 텔레그램 알림 ON/OFF ──
+          # 학습기간(2주)에는 미설정/false → 알림 OFF, 기록·채점만.
+          # 학습 완료 후 Variables 에서 ALERT_ENABLED=true 로 변경 → 알림 ON.
+          ALERT_ENABLED:      ${{ vars.ALERT_ENABLED }}
+          # 선택: 파라미터 오버라이드 (미설정 시 기본값)
+          ORTHO_POLARITIES:   ${{ vars.ORTHO_POLARITIES }}
+        run: python src/ortho_main.py
