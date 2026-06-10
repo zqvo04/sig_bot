@@ -67,7 +67,7 @@ TAKER_VETO     = float(os.getenv("ORTHO_TAKER_VETO", 0.65))     # #7  Taker 역�
 SPREAD_MAX_BPS = float(os.getenv("ORTHO_SPREAD_MAX_BPS", 5))    # #8  스프레드 거부(bps)
 SL_ATR_BUF     = float(os.getenv("ORTHO_SL_ATR_BUF", 0.25))     # #9  SL 버퍼(ATR배수)
 RR_MIN         = float(os.getenv("ORTHO_RR_MIN", 1.0))         # #10 구조 RR 하한
-T_MAX          = int(os.getenv("ORTHO_T_MAX", 7))             # #11 타임스톱(15m봉)
+T_MAX          = int(os.getenv("ORTHO_T_MAX", 8))             # #11 보유한도(15m봉×8=2h) → 종가 채점
 MAX_POS_DIR    = int(os.getenv("ORTHO_MAX_POS_DIR", 2))       # #12 방향별 동시 슬롯
 
 # ── 상속 고정 (업계 표준 · 튜닝 금지 · 예산 비산입) ─────────────────

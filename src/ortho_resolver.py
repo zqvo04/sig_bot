@@ -8,8 +8,10 @@ Notion DB의 Status=OPEN 가상신호를 OKX 실제 가격으로 triple-barrier 
   LONG : high>=TP → WIN / low<=SL → LOSS
   SHORT: low<=TP  → WIN / high>=SL → LOSS
   동일 캔들 TP·SL 동시 → 보수적으로 LOSS
-  bars_limit(15m) 내 미도달 → TIMEOUT
-  진단치 MFE/MAE(R) 기록. 미경과 시 OPEN 유지(다음 실행 재시도, 멱등).
+  시간 한도(bars_limit=2h) 도달 시 TP·SL 미도달이면 →
+     그 시점 종가 기준으로 이익이면 WIN, 손실이면 LOSS (TIMEOUT 없음).
+  모든 판정에 PnL%(진입가 대비 손익률)·MFE/MAE(R) 기록.
+  시간 미경과 시 OPEN 유지(다음 실행 재시도, 멱등 — 2h 전 TP/SL 도달도 매 5분 포착).
 """
 import logging
 import math
@@ -36,7 +38,8 @@ def _parse_signaled_at(iso: str) -> datetime:
 
 
 def evaluate_outcome(exchange, sig: dict) -> dict:
-    res = {"resolved": False, "status": None, "mfe_r": 0.0, "mae_r": 0.0, "bars": 0}
+    res = {"resolved": False, "status": None, "mfe_r": 0.0, "mae_r": 0.0,
+           "bars": 0, "pnl_pct": 0.0, "exit_price": None}
     direction, entry = sig.get("direction"), sig.get("entry")
     tp, sl, r_dist = sig.get("tp"), sig.get("sl"), sig.get("r_dist")
     bars_limit = int(sig.get("bars_limit") or oc.T_MAX)
@@ -57,8 +60,9 @@ def evaluate_outcome(exchange, sig: dict) -> dict:
     is_long = (direction == "long")
     mfe = mae = 0.0
     used = 0
+    exit_price = None
     for c in candles:
-        ts, high, low = c[0], c[2], c[3]
+        ts, high, low, close = c[0], c[2], c[3], c[4]
         if ts <= since_ms:
             continue
         used += 1
@@ -70,12 +74,19 @@ def evaluate_outcome(exchange, sig: dict) -> dict:
             hit_tp, hit_sl = low <= tp, high >= sl
         mfe = max(mfe, fav); mae = max(mae, adv)
         if hit_sl:
-            res["resolved"], res["status"] = True, "LOSS"; break
+            res["resolved"], res["status"], exit_price = True, "LOSS", sl; break
         if hit_tp:
-            res["resolved"], res["status"] = True, "WIN"; break
+            res["resolved"], res["status"], exit_price = True, "WIN", tp; break
         if used >= bars_eval:
-            res["resolved"], res["status"] = True, "TIMEOUT"; break
+            # 시간 한도(2h) 도달 — TP/SL 미도달 → 그 시점 종가로 성패 판정
+            gain = (close - entry) if is_long else (entry - close)
+            res["resolved"], res["status"] = True, ("WIN" if gain > 0 else "LOSS")
+            exit_price = close; break
 
+    if exit_price is not None and entry:
+        pnl = (exit_price - entry) if is_long else (entry - exit_price)
+        res["pnl_pct"] = round(pnl / entry * 100.0, 3)
+        res["exit_price"] = exit_price
     res["mfe_r"] = round(mfe / r_dist, 3)
     res["mae_r"] = round(mae / r_dist, 3)
     res["bars"]  = math.ceil(used / _EVAL_MULT)
@@ -102,23 +113,25 @@ def main():
         return
 
     exchange = od.create_exchange()
-    counts = {"WIN": 0, "LOSS": 0, "TIMEOUT": 0, "OPEN": 0, "ERROR": 0}
+    counts = {"WIN": 0, "LOSS": 0, "OPEN": 0, "ERROR": 0}
     for sig in open_sigs:
         try:
             r = evaluate_outcome(exchange, sig)
             if not r["resolved"]:
                 counts["OPEN"] += 1; continue
             notion.update_outcome(sig["page_id"], r["status"],
-                                  mfe_r=r["mfe_r"], mae_r=r["mae_r"], bars_to_exit=r["bars"])
+                                  mfe_r=r["mfe_r"], mae_r=r["mae_r"],
+                                  bars_to_exit=r["bars"], pnl_pct=r["pnl_pct"])
             counts[r["status"]] = counts.get(r["status"], 0) + 1
             logger.info(f"   {str(sig.get('symbol')):<10}{(sig.get('direction') or '').upper():<6}"
-                        f"→ {r['status']:<7} (MFE {r['mfe_r']:+.2f}R / MAE {r['mae_r']:+.2f}R)")
+                        f"→ {r['status']:<5} PnL {r['pnl_pct']:+.2f}% "
+                        f"(MFE {r['mfe_r']:+.2f}R / MAE {r['mae_r']:+.2f}R)")
         except Exception as e:
             counts["ERROR"] += 1
             logger.error(f"   ❌ {sig.get('symbol')} 판정 오류: {e}")
 
     logger.info(f"📊 완료 — WIN:{counts['WIN']} LOSS:{counts['LOSS']} "
-                f"TIMEOUT:{counts['TIMEOUT']} 미결:{counts['OPEN']} 오류:{counts['ERROR']}")
+                f"미결:{counts['OPEN']} 오류:{counts['ERROR']}")
     logger.info("=" * 55)
 
 

@@ -163,7 +163,7 @@ def open_index() -> dict:
 
 
 # ── 판정 UPDATE ───────────────────────────────────────────────────
-def update_outcome(page_id, status, mfe_r=None, mae_r=None, bars_to_exit=None) -> bool:
+def update_outcome(page_id, status, mfe_r=None, mae_r=None, bars_to_exit=None, pnl_pct=None) -> bool:
     if not enabled() or not page_id:
         return False
     try:
@@ -171,6 +171,7 @@ def update_outcome(page_id, status, mfe_r=None, mae_r=None, bars_to_exit=None) -
         if mfe_r is not None:        props["MFE R"] = _num(round(mfe_r, 3))
         if mae_r is not None:        props["MAE R"] = _num(round(mae_r, 3))
         if bars_to_exit is not None: props["Bars To Exit"] = _num(bars_to_exit)
+        if pnl_pct is not None:      props["PnL %"] = _num(round(pnl_pct, 3))
         r = requests.patch(f"{_API}/pages/{page_id}", headers=_h(),
                            json={"properties": props}, timeout=_T)
         if r.status_code == 200:
