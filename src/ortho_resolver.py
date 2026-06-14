@@ -39,7 +39,7 @@ def _parse_signaled_at(iso: str) -> datetime:
 
 def evaluate_outcome(exchange, sig: dict) -> dict:
     res = {"resolved": False, "status": None, "mfe_r": 0.0, "mae_r": 0.0,
-           "bars": 0, "pnl_pct": 0.0, "exit_price": None}
+           "bars": 0, "pnl_pct": 0.0, "pnl_r": 0.0, "exit_price": None, "exit_reason": None}
     direction, entry = sig.get("direction"), sig.get("entry")
     tp, sl, r_dist = sig.get("tp"), sig.get("sl"), sig.get("r_dist")
     bars_limit = int(sig.get("bars_limit") or oc.T_MAX)
@@ -61,6 +61,13 @@ def evaluate_outcome(exchange, sig: dict) -> dict:
     mfe = mae = 0.0
     used = 0
     exit_price = None
+    # A-1 본전스톱: +BE_TRIGGER_R 도달 시 손절을 진입가(+BE_LOCK_R)로 이동.
+    #   · 무장(arming)은 봉 끝에서 → 다음 봉부터 적용(동일봉 arm&exit 인트라바 모호성 제거).
+    #   · 무장 후엔 BE가 원SL을 대체(더 타이트, 진입가 쪽). lock>0 → BE청산은 소액 WIN(수수료 버퍼).
+    be_trig  = (oc.BE_TRIGGER_R * r_dist) if oc.BE_TRIGGER_R else None
+    be_lock  = oc.BE_LOCK_R * r_dist
+    be_level = None
+    armed    = False
     for c in candles:
         ts, high, low, close = c[0], c[2], c[3], c[4]
         if ts <= since_ms:
@@ -69,23 +76,36 @@ def evaluate_outcome(exchange, sig: dict) -> dict:
         if is_long:
             fav, adv = high - entry, entry - low
             hit_tp, hit_sl = high >= tp, low <= sl
+            hit_be = armed and low <= be_level
         else:
             fav, adv = entry - low, high - entry
             hit_tp, hit_sl = low <= tp, high >= sl
+            hit_be = armed and high >= be_level
         mfe = max(mfe, fav); mae = max(mae, adv)
-        if hit_sl:
-            res["resolved"], res["status"], exit_price = True, "LOSS", sl; break
+        # 우선순위(보수적): 무장 시 BE가 원SL을 흡수 → BE 먼저. 동일봉 TP·스톱 동시는 스톱 우선.
+        if hit_be:
+            res["resolved"], res["status"] = True, ("WIN" if be_lock > 0 else "LOSS")
+            exit_price, res["exit_reason"] = be_level, "BE"; break
+        if (not armed) and hit_sl:
+            res["resolved"], res["status"], exit_price = True, "LOSS", sl
+            res["exit_reason"] = "SL"; break
         if hit_tp:
-            res["resolved"], res["status"], exit_price = True, "WIN", tp; break
+            res["resolved"], res["status"], exit_price = True, "WIN", tp
+            res["exit_reason"] = "TP"; break
         if used >= bars_eval:
             # 시간 한도(2h) 도달 — TP/SL 미도달 → 그 시점 종가로 성패 판정
             gain = (close - entry) if is_long else (entry - close)
             res["resolved"], res["status"] = True, ("WIN" if gain > 0 else "LOSS")
-            exit_price = close; break
+            exit_price, res["exit_reason"] = close, "TIME"; break
+        # 봉 끝: 누적 MFE가 무장 임계 도달 → 다음 봉부터 본전스톱 가동
+        if (not armed) and be_trig and mfe >= be_trig:
+            armed = True
+            be_level = (entry + be_lock) if is_long else (entry - be_lock)
 
     if exit_price is not None and entry:
         pnl = (exit_price - entry) if is_long else (entry - exit_price)
         res["pnl_pct"] = round(pnl / entry * 100.0, 3)
+        res["pnl_r"]   = round(pnl / r_dist, 3)      # C-1 실현 R (PnL%가 아닌 R로 평가)
         res["exit_price"] = exit_price
     res["mfe_r"] = round(mfe / r_dist, 3)
     res["mae_r"] = round(mae / r_dist, 3)
@@ -121,11 +141,13 @@ def main():
                 counts["OPEN"] += 1; continue
             notion.update_outcome(sig["page_id"], r["status"],
                                   mfe_r=r["mfe_r"], mae_r=r["mae_r"],
-                                  bars_to_exit=r["bars"], pnl_pct=r["pnl_pct"])
+                                  bars_to_exit=r["bars"], pnl_pct=r["pnl_pct"],
+                                  pnl_r=r["pnl_r"], exit_reason=r["exit_reason"])
             counts[r["status"]] = counts.get(r["status"], 0) + 1
             logger.info(f"   {str(sig.get('symbol')):<10}{(sig.get('direction') or '').upper():<6}"
-                        f"→ {r['status']:<5} PnL {r['pnl_pct']:+.2f}% "
-                        f"(MFE {r['mfe_r']:+.2f}R / MAE {r['mae_r']:+.2f}R)")
+                        f"→ {r['status']:<5} {str(r['exit_reason'] or ''):<4} "
+                        f"PnL {r['pnl_pct']:+.2f}% / R {r['pnl_r']:+.2f} "
+                        f"(MFE {r['mfe_r']:+.2f} / MAE {r['mae_r']:+.2f})")
         except Exception as e:
             counts["ERROR"] += 1
             logger.error(f"   ❌ {sig.get('symbol')} 판정 오류: {e}")

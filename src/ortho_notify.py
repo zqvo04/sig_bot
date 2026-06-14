@@ -64,7 +64,9 @@ def build_message(sig: dict) -> str:
         f"───────────────\n"
         f"위치 L={sig.get('l_pct')}  흐름 F={sig.get('f_pct')}  구조 {sig.get('s_state')}\n"
         f"국면 {sig.get('macro_tag')}\n"
-        f"⏱ 타임스톱 {sig.get('bars_limit')}봉(15m)\n"
+        f"💰 수량 <b>{sig.get('size')}</b> (≈{sig.get('notional')} USDT) · "
+        f"위험 {sig.get('risk_quote')} USDT = 1R({sig.get('risk_pct')}%)\n"
+        f"⏱ 타임스톱 {sig.get('bars_limit')}봉(15m) · BE +{oc.BE_TRIGGER_R}R\n"
         f"<i>※ 가상매매(페이퍼) 신호 — 실주문 아님</i>"
     )
 

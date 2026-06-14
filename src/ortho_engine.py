@@ -194,6 +194,13 @@ def build_barriers(polarity, direction, entry, candles_15m, loc) -> Optional[dic
     rr = tp_dist / sl_dist
     if rr < oc.RR_MIN:
         return None
+    # A-4: 타임스톱(T_MAX봉≈2h) 안에 닿지 못할 먼 목표(RR 과대)를 RR_MAX로 당겨 TP·청산을 정합.
+    #      SL=구조 그대로(리스크 불변), TP만 도달가능 거리로 축소. 진입 가부는 불변(RR_MAX≥RR_MIN).
+    #      RR은 스케일프리 비율 → 특정 가격/변동성에 곡선맞춤하지 않음(과적합 표면 아님).
+    if oc.RR_MAX and oc.RR_MAX >= oc.RR_MIN and rr > oc.RR_MAX:
+        tp_dist = oc.RR_MAX * sl_dist
+        tp = (entry + tp_dist) if d == "long" else (entry - tp_dist)
+        rr = oc.RR_MAX
     return {"sl": _round_price(sl, entry), "tp": _round_price(tp, entry),
             "sl_dist": round(sl_dist, 8), "rr": round(rr, 2), "bars_limit": oc.T_MAX}
 
@@ -258,10 +265,18 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
         if b is None:
             logger.info(f"[engine] {symbol} {polarity} {direction} RR<{oc.RR_MIN} 스킵")
             continue
+        # C-1 등가-R 사이징: SL 거리(=1R)로 수량을 역산 → 모든 신호가 동일 금액(RISK_PER_TRADE) 위험.
+        #     변동성 큰 코인=작은 수량, 작은 코인=큰 수량 → PnL%가 아니라 R로 자동 정규화.
+        rdist = b["sl_dist"]
+        risk_pct = round(rdist / entry * 100.0, 3) if entry else None      # 1R 크기(진입가 대비 %)
+        size     = round(oc.RISK_PER_TRADE / rdist, 6) if rdist > 0 else None
+        notional = round(size * entry, 2) if size else None
         out.append({
             "symbol": symbol, "polarity": polarity, "direction": direction,
             "entry": _round_price(entry, entry), "tp": b["tp"], "sl": b["sl"],
             "r_dist": b["sl_dist"], "rr": b["rr"], "bars_limit": b["bars_limit"],
+            "risk_quote": oc.RISK_PER_TRADE, "risk_pct": risk_pct,
+            "size": size, "notional": notional,
             "l_pct": loc["L_pct"], "f_pct": flow["F_pct"],
             "s_state": f"up{struct['ema_up_count']}/{struct['ema_tf_n']}",
             "macro_tag": mtag,

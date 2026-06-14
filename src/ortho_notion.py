@@ -76,6 +76,10 @@ def log_signal(sig: dict) -> Optional[str]:
             "MacroTag":    _sel(sig.get("macro_tag")),
             "Reason":      _txt(sig.get("reason")),
             "Signaled At": _date(timeutil.now_kst_iso()),
+            # C-1 등가-R 사이징 기록(기존 Note 칼럼 재사용 — 스키마 변경 불필요).
+            "Note":        _txt(f"size={sig.get('size')} ({sig.get('notional')}U) "
+                                f"risk={sig.get('risk_quote')}U=1R({sig.get('risk_pct')}%) "
+                                f"| BE@{oc.BE_TRIGGER_R}R+{oc.BE_LOCK_R}R capRR{oc.RR_MAX}"),
         }
         body = {"parent": {"database_id": oc.NOTION_DATABASE_ID}, "properties": props}
         r = requests.post(f"{_API}/pages", headers=_h(), json=body, timeout=_T)
@@ -144,11 +148,12 @@ def query_open(limit=None):
 def open_index() -> dict:
     """현재 OPEN 신호를 색인해 중복/과밀 진입을 차단한다 (1회 쿼리).
       keys      : {(symbol, polarity, direction)} — 동일 셋업 OPEN 여부
-      dir_count : {(symbol, direction): 건수}      — 방향별 슬롯(MAX_POS_DIR)
+      dir_count : {(symbol, direction): 건수}      — 심볼·방향별 슬롯(MAX_POS_DIR)
+      glob_dir  : {direction: 건수}               — 전역 방향 노출(MAX_CONCURRENT_DIR, A-3)
     동일 셋업이 이미 OPEN이면 해소(WIN/LOSS/TIMEOUT) 전까지 재진입 금지 →
     같은 시장상황에서 15분마다 같은 신호가 중복 적재되는 것을 막는다.
     """
-    idx = {"keys": set(), "dir_count": {}}
+    idx = {"keys": set(), "dir_count": {}, "glob_dir": {}}
     if not enabled():
         return idx
     for r in query_open():
@@ -159,11 +164,13 @@ def open_index() -> dict:
             continue
         idx["keys"].add((sym, pol, dr))
         idx["dir_count"][(sym, dr)] = idx["dir_count"].get((sym, dr), 0) + 1
+        idx["glob_dir"][dr] = idx["glob_dir"].get(dr, 0) + 1   # A-3 전역 방향 노출
     return idx
 
 
 # ── 판정 UPDATE ───────────────────────────────────────────────────
-def update_outcome(page_id, status, mfe_r=None, mae_r=None, bars_to_exit=None, pnl_pct=None) -> bool:
+def update_outcome(page_id, status, mfe_r=None, mae_r=None, bars_to_exit=None,
+                   pnl_pct=None, pnl_r=None, exit_reason=None) -> bool:
     if not enabled() or not page_id:
         return False
     try:
@@ -172,6 +179,13 @@ def update_outcome(page_id, status, mfe_r=None, mae_r=None, bars_to_exit=None, p
         if mae_r is not None:        props["MAE R"] = _num(round(mae_r, 3))
         if bars_to_exit is not None: props["Bars To Exit"] = _num(bars_to_exit)
         if pnl_pct is not None:      props["PnL %"] = _num(round(pnl_pct, 3))
+        # C-1 실현 R + 청산사유(TP/SL/BE/TIME)를 Note에 기록(스키마 변경 불필요).
+        bits = []
+        if pnl_r is not None: bits.append(f"R={pnl_r:+.2f}")
+        if exit_reason:       bits.append(str(exit_reason))
+        if mfe_r is not None and mae_r is not None:
+            bits.append(f"MFE{mfe_r:+.2f}/MAE{mae_r:+.2f}")
+        if bits:                     props["Note"] = _txt(" | ".join(bits))
         r = requests.patch(f"{_API}/pages/{page_id}", headers=_h(),
                            json={"properties": props}, timeout=_T)
         if r.status_code == 200:
