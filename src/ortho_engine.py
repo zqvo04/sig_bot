@@ -196,8 +196,67 @@ def regime_polarities(regime: str) -> tuple:
     return {
         "RANGE":     ("REV",),
         "TREND":     ("CONT",),
-        "EXPANSION": ("CONT",),
+        "EXPANSION": ("BREAKOUT",),   # R4 — 거래량 동반 VWAP 돌파 전문
     }.get(regime, ())
+
+
+# ════════════════════════════════════════════════════════════════════
+# 1-B. BREAKOUT 셋업 (R4 — S2: VWAP 재탈환 + 거래량 서지, 신규 fetch 0)
+# ────────────────────────────────────────────────────────────────────
+#   EXPANSION 국면에서만 가동. 약한 구조의 저확신 확장 진입(데이터 up1/3 −21R)을
+#   "거래량 동반 VWAP 돌파"로 대체. 모든 컷은 자기정규화(VWAP·거래량 백분위) + 롱숏 대칭.
+#     롱: 직전 종가<VWAP ≤ 현재 종가(신선 재탈환) ∧ 거래량서지 ∧ F=상승 ∧ L≠과열고
+#     숏: 거울쌍
+#   거래량 "20SMA·150%" 같은 절대비율 대신 그 코인 자기분포 백분위(P_VOL)로 치환 → 과적합 방지.
+# ════════════════════════════════════════════════════════════════════
+def rolling_vwap(candles_15m, window) -> Optional[float]:
+    """롤링 VWAP(전형가격 Σtp·v/Σv) — 일중 자기정규화 앵커. window=W_L 재사용(신규 파라미터 0)."""
+    rows = candles_15m[-window:]
+    num = den = 0.0
+    for c in rows:
+        h, l, cl, v = float(c[2]), float(c[3]), float(c[4]), float(c[5])
+        tp = (h + l + cl) / 3.0
+        num += tp * v; den += v
+    return num / den if den > 0 else None
+
+
+def vol_surge_pct(candles_15m, window) -> Optional[float]:
+    """현재 봉 거래량의 최근 window 분포 내 백분위(0~100). 절대 150% 대신 자기정규화."""
+    vols = [float(c[5]) for c in candles_15m[-window:]]
+    if len(vols) < max(2, window // 2):
+        return None
+    return percentile_rank(vols[-1], vols)
+
+
+def _decide_breakout(candles_15m, loc, flow) -> Optional[str]:
+    vwap = loc.get("vwap")
+    if vwap is None:
+        return None
+    surge = vol_surge_pct(candles_15m, oc.W_L)
+    if surge is None or surge < oc.P_VOL:      # 거래량 동반 없으면 돌파 무시
+        return None
+    closes = _closes(candles_15m)
+    if len(closes) < 2:
+        return None
+    prev, cur = closes[-2], closes[-1]
+    F, L = flow["state"], loc["state"]
+    if prev < vwap <= cur and F == "FLOW_UP" and L != "EXT_HIGH":
+        return "long"
+    if prev > vwap >= cur and F == "FLOW_DOWN" and L != "EXT_LOW":
+        return "short"
+    return None
+
+
+# 1-C. 추격 방지 (R5 — S3: 정배열 초입만, 연장 추세 진입 차단)
+#   데이터 up3/3 −0.21R = 성숙·연장 추세 진입. 진입가와 빠른 EMA의 이격을 ATR로 제한해
+#   "추세 초입(EMA 근처)"만 허용. 0.5% 같은 절대% 대신 CHASE_K·ATR(자기정규화) + 롱숏 대칭.
+def _within_chase(candles_15m, entry, atr) -> bool:
+    if not oc.CHASE_K or oc.CHASE_K <= 0:
+        return True
+    ef = ema(_closes(candles_15m), oc.EMA_FAST)
+    if ef is None or atr <= 0:
+        return True
+    return abs(entry - ef) <= oc.CHASE_K * atr
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -235,11 +294,13 @@ def build_barriers(polarity, direction, entry, candles_15m, loc) -> Optional[dic
     sw_low  = [float(c[3]) for c in candles_15m[-oc.W_L:]]
     sw_high = [float(c[2]) for c in candles_15m[-oc.W_L:]]
     d = direction.lower()
+    # BREAKOUT(R4): 무효화=VWAP 재이탈 → SL=VWAP±buf(정적, triple-barrier 정합). TP=직전 스윙.
+    vwap = loc.get("vwap")
     if d == "long":
-        sl = min(lows) - buf
+        sl = (vwap - buf) if (polarity == "BREAKOUT" and vwap) else (min(lows) - buf)
         tp = loc["mean"] if polarity == "REV" else max(sw_high)
     else:
-        sl = max(highs) + buf
+        sl = (vwap + buf) if (polarity == "BREAKOUT" and vwap) else (max(highs) + buf)
         tp = loc["mean"] if polarity == "REV" else min(sw_low)
     if tp is None:
         return None
@@ -315,25 +376,34 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
     loc, flow = axis_location(c15), axis_flow(c5)
     if loc is None or flow is None:
         return []
+    loc["vwap"] = rolling_vwap(c15, oc.W_L)     # R4 — BREAKOUT 트리거/SL 앵커
     struct = axis_structure(c15, c1h, c4h)
     mtag = macro_tag(c4h)
 
-    # R1 레짐 라우터: 켜져 있으면 현 국면에 맞는 폴라리티만 평가(방향 대칭 불변).
-    regime = classify_regime(c15, struct) if oc.REGIME_ROUTER else None
-    if regime is not None:
-        routed = regime_polarities(regime)
-        polarities = tuple(p for p in oc.POLARITIES if p in routed)
+    # R1 레짐 라우터: 켜져 있으면 라우터가 폴라리티를 결정(REV/CONT/BREAKOUT). 방향 대칭 불변.
+    #   라우터 ON 시 라우터가 권위(POLARITIES 환경변수 대체) → EXPANSION→BREAKOUT 평가 가능.
+    if oc.REGIME_ROUTER:
+        regime = classify_regime(c15, struct)
+        polarities = regime_polarities(regime)
         if not polarities:
             logger.info(f"[engine] {symbol} 레짐={regime} → 허용 폴라리티 없음, 스킵")
             return []
     else:
+        regime = None
         polarities = oc.POLARITIES
 
     spread = None
     out: List[Dict] = []
     for polarity in polarities:
-        direction = _decide_direction(polarity, loc, flow, struct)
+        if polarity == "BREAKOUT":
+            direction = _decide_breakout(c15, loc, flow)
+        else:
+            direction = _decide_direction(polarity, loc, flow, struct)
         if direction is None:
+            continue
+        # R5 추격 방지: CONT(추세동행)는 빠른 EMA 근처(초입)에서만. 연장 추세 진입 차단.
+        if polarity == "CONT" and not _within_chase(c15, entry, loc["atr"]):
+            logger.info(f"[engine] {symbol} CONT {direction} 추격(>CHASE_K·ATR) 스킵")
             continue
         if spread is None:
             spread = od.fetch_spread_bps(exchange, symbol)

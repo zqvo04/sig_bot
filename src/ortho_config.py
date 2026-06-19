@@ -101,6 +101,12 @@ REGIME_ROUTER = _flag("ORTHO_REGIME_ROUTER", "false")        # R1 라우터 ON/O
 VOL_HI        = float(os.getenv("ORTHO_VOL_HI", 70))         # R1 확장 레짐 변동성 백분위 컷
 # R2 도달가능 TP 계수: TP거리 ≤ K·ATR·√T_MAX. 0=비활성. 권장 첫 검증값 ≈ 1.2.
 TP_REACH_K    = float(os.getenv("ORTHO_TP_REACH_K", 0))
+# R4 BREAKOUT(EXPANSION 전용): 거래량 서지 백분위 컷(절대 150% 대신 자기분포 백분위). 라우터 ON일 때만 가동.
+P_VOL         = float(os.getenv("ORTHO_P_VOL", 70))
+# R5 추격 방지: CONT 진입가-빠른EMA 이격 한도(ATR 배수, 절대% 대신). 0=비활성, 권장 ≈ 1.0.
+CHASE_K       = float(os.getenv("ORTHO_CHASE_K", 0))
+# R6 상관 디둡: 동일 실행 내 후보를 품질(RR) 우선 정렬 후 방향 캡 적용(그리디→최선순). 기본 OFF.
+CORR_DEDUP    = _flag("ORTHO_CORR_DEDUP", "false")
 
 # ── 상속 고정 (업계 표준 · 튜닝 금지 · 예산 비산입) ─────────────────
 N_ATR        = 14
@@ -136,8 +142,8 @@ def summary() -> str:
     return (f"ALERT={'ON' if ALERT_ENABLED else 'OFF(학습)'} "
             f"| W_L={W_L} P_EXT={P_EXT} W_F={W_F} P_FLOW={P_FLOW} RR_MIN={RR_MIN} "
             f"| POLARITIES={','.join(POLARITIES)} "
-            f"| regime={'ON(VOL_HI'+str(int(VOL_HI))+')' if REGIME_ROUTER else 'OFF'} "
-            f"reachK={TP_REACH_K:g} "
+            f"| regime={'ON(VOL_HI'+str(int(VOL_HI))+'/P_VOL'+str(int(P_VOL))+')' if REGIME_ROUTER else 'OFF'} "
+            f"reachK={TP_REACH_K:g} chaseK={CHASE_K:g} dedup={'ON' if CORR_DEDUP else 'OFF'} "
             f"| risk={RISK_PER_TRADE:g}U BE@{BE_TRIGGER_R}R/+{BE_LOCK_R}R "
             f"maxDir={MAX_CONCURRENT_DIR} RR_MAX={RR_MAX} "
             f"| notion={'ON' if NOTION_ENABLED else 'OFF'}")

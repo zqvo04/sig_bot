@@ -111,11 +111,17 @@ docs/
 
 | 변수 | 기본 | 역할 |
 |---|---|---|
-| `ORTHO_REGIME_ROUTER` | `false` | **R1.** 국면 판정(RANGE→REV / TREND→CONT / EXPANSION→CONT)으로 맞는 폴라리티만 평가. 추세장 역행·혼탁구조 진입 차단. 롱숏 대칭 불변 |
+| `ORTHO_REGIME_ROUTER` | `false` | **R1.** 국면 판정(RANGE→REV / TREND→CONT / **EXPANSION→BREAKOUT**)으로 맞는 폴라리티만 평가. 추세장 역행·혼탁구조 진입 차단. 롱숏 대칭 불변 |
 | `ORTHO_VOL_HI` | 70 | R1 확장 레짐 변동성 백분위 컷 |
-| `ORTHO_TP_REACH_K` | 0 | **R2.** TP거리 ≤ `K·ATR·√T_MAX` 로 상한(명목RR≠실현R 보정). 0=비활성, 권장 첫 검증값 ≈1.2 |
+| `ORTHO_TP_REACH_K` | 0 | **R2.** TP거리 ≤ `K·ATR·√T_MAX` 로 상한(명목RR≠실현R 보정). 0=비활성, 권장 ≈1.2 |
+| `ORTHO_P_VOL` | 70 | **R4.** BREAKOUT 거래량 서지 백분위 컷(절대 150% 대신 자기분포). 라우터 ON·EXPANSION에서만 |
+| `ORTHO_CHASE_K` | 0 | **R5.** CONT 추격 방지: `|진입−EMA_fast| ≤ K·ATR`(절대% 대신). 0=비활성, 권장 ≈1.0 |
+| `ORTHO_CORR_DEDUP` | `false` | **R6.** 동일 실행 후보를 RR 우선 정렬 후 방향 캡 적용(그리디→최선순). 13연패·동질배치 완화 |
 
-> 켤 때 반드시 **70/30 워크포워드·단일변수**. 신호엔 `RG=레짐` 태그가 기록되어
+> **R4 BREAKOUT**(=S2 VWAP+거래량): EXPANSION 국면 전용. 롱=직전종가<VWAP≤현재종가(신선 재탈환)
+> ∧ 거래량서지 ∧ F=상승 ∧ L≠과열, 숏=거울쌍. SL=VWAP±buf(재이탈=무효, 정적). TP=직전 스윙(R2 상한).
+> **R5**(=S3 EMA onset): 연장 추세(데이터 up3/3 −0.21R) 추격을 ATR 이격으로 차단.
+> 켤 때 반드시 **70/30 워크포워드·단일변수**. 신호엔 `RG=레짐` 태그 기록 →
 > `scripts/ortho_report.py` 가 **Polarity·Regime·Regime×Direction 코호트**로 분해(R7).
 
 ---
