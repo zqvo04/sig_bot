@@ -10,9 +10,10 @@ ortho_engine.py — ORTHO-3 직교 3축 합의 엔진 (자립형) [TARGET: 15분
   [축 S] 구조  : 다TF(15m/1h/4h) EMA 정렬 + 신선 돌파
   [VETO]       : 군중 과밀(LS) / Taker 역방향 / 호가 스프레드
 
-폴라리티:
-  REV  회귀형 : L=극단 ∧ F=반전 ∧ ¬S_broken → 평균 회귀
-  CONT 연속형 : L=눌림 ∧ F=동조 ∧ S=정렬   → 추세 지속
+폴라리티 (R1 레짐 라우터가 국면별로 택일; 라우터 OFF면 POLARITIES 환경변수):
+  REV   회귀형 : L=극단 ∧ F=반전 ∧ ¬S_broken → 평균 회귀   (RANGE 국면)
+  CONT  연속형 : L=눌림 ∧ F=동조 ∧ S=정렬 ∧ ¬추격 → 추세 지속 (TREND 국면)
+  BREAKOUT 돌파형: VWAP 신선 재탈환 ∧ 거래량 서지 ∧ F=동조 → 확장 추종 (EXPANSION 국면)
 
 반환: 가상 신호 dict 리스트 (ortho_notion/ortho_notify가 소비). 실주문 없음.
 """
