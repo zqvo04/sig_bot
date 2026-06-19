@@ -17,6 +17,7 @@ ortho_engine.py — ORTHO-3 직교 3축 합의 엔진 (자립형) [TARGET: 15분
 반환: 가상 신호 dict 리스트 (ortho_notion/ortho_notify가 소비). 실주문 없음.
 """
 import logging
+import math
 from typing import List, Dict, Optional
 
 import sys, os
@@ -144,6 +145,62 @@ def axis_structure(candles_15m, candles_1h, candles_4h) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════════
+# 1-R. 레짐 라우터 (R1 — 국면 전문가만 켠다, 신규 fetch 0)
+# ────────────────────────────────────────────────────────────────────
+#   현 시스템 최대 누수: 모든 셋업을 모든 국면에서 대칭 난사(추세장 역행 −41R).
+#   각 폴라리티를 "맞는 국면"에서만 허용 → 카운터트렌드/혼탁 진입을 구조 차단.
+#   판정은 전부 그 코인 자기분포 백분위(절대숫자 금지) + 롱숏 대칭 유지.
+#     RANGE     (추세 약 · 변동성 수축) → REV  만 (평균회귀; S1 BB+RSI 대응)
+#     TREND     (다TF EMA 정렬)         → CONT 만 (추세동행; S3 정배열 대응)
+#     EXPANSION (변동성 확장 · 무추세)   → CONT    (돌파 모멘텀; S2 — BREAKOUT 전문화는 R4)
+#   기존 _decide_direction이 폴라리티 안에서 롱/숏을 거울 대칭으로 결정하므로
+#   라우터는 "어떤 폴라리티를 평가할지"만 좁힌다(방향 대칭 불변).
+# ════════════════════════════════════════════════════════════════════
+def _norm_range_series(candles_15m) -> list:
+    """봉별 정규화 변동폭 (high−low)/close — 코인·가격대 무관 자기정규화."""
+    out = []
+    for c in candles_15m:
+        h, l, cl = float(c[2]), float(c[3]), float(c[4])
+        if cl > 0:
+            out.append((h - l) / cl)
+    return out
+
+
+def regime_vol_pct(candles_15m) -> Optional[float]:
+    """변동성 상태 = 최근 W_F봉 평균변동폭의 W_L 분포 내 백분위(0=수축, 100=확장)."""
+    vals = _norm_range_series(candles_15m)
+    if len(vals) < oc.W_L:
+        return None
+    means = [sum(vals[end - oc.W_F:end]) / oc.W_F
+             for end in range(oc.W_F, len(vals) + 1)]
+    means = means[-oc.W_L:]
+    return percentile_rank(means[-1], means)
+
+
+def classify_regime(candles_15m, struct) -> str:
+    """국면 판정: TREND(전 TF 동일방향) > EXPANSION(고변동·부분정렬) > RANGE(기본).
+    주의: aligned_up/down은 3TF에서 항상 한쪽이 참(up≤1=down, up≥2=up)이라 레짐 분리 불가 →
+    '강추세'는 전 TF 만장일치(up==n 또는 up==0)로만 정의해야 RANGE/EXPANSION이 살아난다.
+    """
+    n, up = struct["ema_tf_n"], struct["ema_up_count"]
+    if up == n or up == 0:            # 전 타임프레임 동일방향 = 강추세
+        return "TREND"
+    vol = regime_vol_pct(candles_15m)
+    if vol is not None and vol >= oc.VOL_HI:
+        return "EXPANSION"
+    return "RANGE"
+
+
+def regime_polarities(regime: str) -> tuple:
+    """국면 → 허용 폴라리티(롱숏은 폴라리티 내부에서 대칭 결정)."""
+    return {
+        "RANGE":     ("REV",),
+        "TREND":     ("CONT",),
+        "EXPANSION": ("CONT",),
+    }.get(regime, ())
+
+
+# ════════════════════════════════════════════════════════════════════
 # 2. 맥락 거부권 (차단 전용)
 # ════════════════════════════════════════════════════════════════════
 def context_veto(direction, context, spread_bps) -> Optional[str]:
@@ -199,8 +256,20 @@ def build_barriers(polarity, direction, entry, candles_15m, loc) -> Optional[dic
     #      RR은 스케일프리 비율 → 특정 가격/변동성에 곡선맞춤하지 않음(과적합 표면 아님).
     if oc.RR_MAX and oc.RR_MAX >= oc.RR_MIN and rr > oc.RR_MAX:
         tp_dist = oc.RR_MAX * sl_dist
-        tp = (entry + tp_dist) if d == "long" else (entry - tp_dist)
         rr = oc.RR_MAX
+    # R2 도달가능 TP: 명목 RR≠실현 R(데이터 캡처효율 52%·타임스톱 32%·RR≥3 손실)의 본체.
+    #     "타임스톱 내 못 닿는 TP는 가짜 목표." TP거리를 ATR·√T_MAX(확산 스케일)로 상한.
+    #     SL=구조 그대로(리스크 불변). TP_REACH_K=0이면 비활성(현 동작 보존, A/B용).
+    #     ATR 자기정규화 → 특정 가격/코인에 곡선맞춤 아님. 롱·숏 동일식(대칭).
+    #     축소 후 RR<RR_MIN이면 "현실적 목표가 손익비 미달" → 선별 스킵.
+    if oc.TP_REACH_K and oc.TP_REACH_K > 0:
+        reach = oc.TP_REACH_K * a * math.sqrt(oc.T_MAX)
+        if tp_dist > reach:
+            tp_dist = reach
+            rr = tp_dist / sl_dist
+            if rr < oc.RR_MIN:
+                return None
+    tp = (entry + tp_dist) if d == "long" else (entry - tp_dist)
     return {"sl": _round_price(sl, entry), "tp": _round_price(tp, entry),
             "sl_dist": round(sl_dist, 8), "rr": round(rr, 2), "bars_limit": oc.T_MAX}
 
@@ -249,9 +318,20 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
     struct = axis_structure(c15, c1h, c4h)
     mtag = macro_tag(c4h)
 
+    # R1 레짐 라우터: 켜져 있으면 현 국면에 맞는 폴라리티만 평가(방향 대칭 불변).
+    regime = classify_regime(c15, struct) if oc.REGIME_ROUTER else None
+    if regime is not None:
+        routed = regime_polarities(regime)
+        polarities = tuple(p for p in oc.POLARITIES if p in routed)
+        if not polarities:
+            logger.info(f"[engine] {symbol} 레짐={regime} → 허용 폴라리티 없음, 스킵")
+            return []
+    else:
+        polarities = oc.POLARITIES
+
     spread = None
     out: List[Dict] = []
-    for polarity in oc.POLARITIES:
+    for polarity in polarities:
         direction = _decide_direction(polarity, loc, flow, struct)
         if direction is None:
             continue
@@ -280,9 +360,11 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
             "l_pct": loc["L_pct"], "f_pct": flow["F_pct"],
             "s_state": f"up{struct['ema_up_count']}/{struct['ema_tf_n']}",
             "macro_tag": mtag,
+            "regime": regime or "OFF",     # R7 레짐 코호트 기록
             "reason": (f"{polarity} {direction.upper()} | L={loc['state']}({loc['L_pct']}) "
                        f"F={flow['state']}({flow['F_pct']}) "
-                       f"S=up{struct['ema_up_count']}/{struct['ema_tf_n']} RR={b['rr']}"),
+                       f"S=up{struct['ema_up_count']}/{struct['ema_tf_n']} "
+                       f"RG={regime or 'OFF'} RR={b['rr']}"),
         })
         logger.info(f"[engine] 🟦 {out[-1]['reason']}")
     return out

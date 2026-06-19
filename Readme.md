@@ -104,6 +104,20 @@ docs/
 
 > 실질 튜닝 대상은 `W_L`·`P_EXT`·`P_FLOW` 3개. 단일 변수 원칙·워크포워드 검증.
 
+### 레짐 라우터 + 도달가능 TP (R1·R2 — 기본 OFF, 단일변수 A/B)
+
+신호기록 분석에서 **실현 기대값 −0.14R**(승률 41.5%·캡처효율 52%·추세장 역행 −41R)이 확인됨.
+두 토글로 구조 보정(둘 다 자기정규화 백분위·ATR → 과적합 표면 아님):
+
+| 변수 | 기본 | 역할 |
+|---|---|---|
+| `ORTHO_REGIME_ROUTER` | `false` | **R1.** 국면 판정(RANGE→REV / TREND→CONT / EXPANSION→CONT)으로 맞는 폴라리티만 평가. 추세장 역행·혼탁구조 진입 차단. 롱숏 대칭 불변 |
+| `ORTHO_VOL_HI` | 70 | R1 확장 레짐 변동성 백분위 컷 |
+| `ORTHO_TP_REACH_K` | 0 | **R2.** TP거리 ≤ `K·ATR·√T_MAX` 로 상한(명목RR≠실현R 보정). 0=비활성, 권장 첫 검증값 ≈1.2 |
+
+> 켤 때 반드시 **70/30 워크포워드·단일변수**. 신호엔 `RG=레짐` 태그가 기록되어
+> `scripts/ortho_report.py` 가 **Polarity·Regime·Regime×Direction 코호트**로 분해(R7).
+
 ---
 
 ## Notion 스키마 (ORTHO 양식)

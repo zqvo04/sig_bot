@@ -58,6 +58,7 @@ def log_signal(sig: dict) -> Optional[str]:
         d = (sig.get("direction") or "").upper()
         props = {
             "Signal":      _title(f"{sig['symbol']} {d} · {sig['polarity']} · "
+                                  f"RG{sig.get('regime','OFF')} · "
                                   f"RR{sig.get('rr','?')} · {sig.get('macro_tag','?')}"),
             "Status":      _sel("OPEN"),
             "Engine":      _sel(f"ORTHO-{sig['polarity']}"),
@@ -77,9 +78,11 @@ def log_signal(sig: dict) -> Optional[str]:
             "Reason":      _txt(sig.get("reason")),
             "Signaled At": _date(timeutil.now_kst_iso()),
             # C-1 등가-R 사이징 기록(기존 Note 칼럼 재사용 — 스키마 변경 불필요).
-            "Note":        _txt(f"size={sig.get('size')} ({sig.get('notional')}U) "
+            "Note":        _txt(f"RG={sig.get('regime','OFF')} "
+                                f"size={sig.get('size')} ({sig.get('notional')}U) "
                                 f"risk={sig.get('risk_quote')}U=1R({sig.get('risk_pct')}%) "
-                                f"| BE@{oc.BE_TRIGGER_R}R+{oc.BE_LOCK_R}R capRR{oc.RR_MAX}"),
+                                f"| BE@{oc.BE_TRIGGER_R}R+{oc.BE_LOCK_R}R capRR{oc.RR_MAX} "
+                                f"reachK={oc.TP_REACH_K:g}"),
         }
         body = {"parent": {"database_id": oc.NOTION_DATABASE_ID}, "properties": props}
         r = requests.post(f"{_API}/pages", headers=_h(), json=body, timeout=_T)

@@ -34,11 +34,35 @@ def _parse_dt(s):
     return datetime.datetime(y, mo, d, h, mi)
 
 
+def _polarity(r):
+    """폴라리티 복원: Polarity 칼럼 → Engine(ORTHO-X) → Reason 첫 토큰 순."""
+    p = (r.get('Polarity') or '').strip()
+    if p:
+        return p
+    eng = (r.get('Engine') or '').strip()
+    if eng.startswith('ORTHO-') and len(eng) > 6:
+        return eng[6:]
+    reason = (r.get('Reason') or '').strip()
+    tok = reason.split()
+    if tok and tok[0] in ('REV', 'CONT', 'BREAKOUT'):
+        return tok[0]
+    return '?'
+
+
+def _regime(r):
+    """레짐 복원: Reason/Note/Signal의 'RG=' 또는 'RGxxx' 토큰에서 추출."""
+    blob = ' '.join(str(r.get(k) or '') for k in ('Reason', 'Note', 'Signal'))
+    m = re.search(r'RG[=]?([A-Z]+)', blob)
+    return m.group(1) if m else '?'
+
+
 def load(path):
     rows = []
     with open(path, encoding='utf-8') as f:
         for row in csv.DictReader(f):
             r = {k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
+            r['pol'] = _polarity(r)
+            r['regime'] = _regime(r)
             r['pnl'] = _f(r.get('PnL %'))
             r['mfe'] = _f(r.get('MFE R'))
             r['mae'] = _f(r.get('MAE R'))
@@ -113,6 +137,9 @@ def main():
         te = sum(1 for r in res if r['b2e'] == 8)
         print(f"  타임스톱(8봉) 종료: {te}/{len(res)} ({te/len(res)*100:.0f}%)")
 
+    cohort(res, lambda r: r['pol'], "Polarity")          # R7 폴라리티 코호트(REV/CONT)
+    cohort(res, lambda r: r['regime'], "Regime")         # R7 레짐 코호트(RANGE/TREND/EXP)
+    cohort(res, lambda r: f"{r['regime']}/{r['Direction']}", "Regime×Direction")
     cohort(res, lambda r: r['Direction'], "Direction")
     cohort(res, lambda r: r['MacroTag'], "MacroTag")
     cohort(res, lambda r: r['S_state'], "S_state")
