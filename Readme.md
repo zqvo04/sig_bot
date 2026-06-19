@@ -22,7 +22,7 @@ GitHub Actions로 무인 운영, Notion에 기록·채점, 텔레그램 알림(O
 ### 설계 철학
 1. 매 판정은 그 코인의 **최근 자기 분포 백분위** 안에서만 (미시 레짐, 매크로 무관)
 2. 점수를 **더하지 않는다** — 축은 동의(AND)/거부(VETO)만
-3. 절대 숫자 임계 금지 — 모든 컷은 백분위
+3. 절대 숫자 임계 금지 — 모든 컷은 백분위 또는 ATR 배수
 4. 롱/숏 **완전 대칭**
 5. 파라미터 **12개 하드캡** (레거시 207 → 12)
 6. **무상태(stateless)**
@@ -35,11 +35,17 @@ GitHub Actions로 무인 운영, Notion에 기록·채점, 텔레그램 알림(O
 | **S 구조** | 15m/1h/4h EMA 정렬 + 신선 돌파 | 이진 |
 | **VETO** | 군중 과밀(LS) · Taker 역방향 · 호가 스프레드 | 차단 전용 |
 
-### 두 폴라리티
-- **REV(회귀형):** L=극단 ∧ F=반전 ∧ ¬S_broken → 평균(SMA) 회귀
-- **CONT(연속형):** L=눌림 ∧ F=동조 ∧ S=정렬 → 직전 스윙(측정이동)
+### 세 폴라리티 (R1 레짐 라우터와 연동)
+| 폴라리티 | 국면 | 조건 | 전략 대응 |
+|---|---|---|---|
+| **REV** (회귀형) | RANGE | L=극단 ∧ F=반전 ∧ ¬S_broken → 평균(SMA) 회귀 | S1 BB+RSI |
+| **CONT** (연속형) | TREND | L=눌림 ∧ F=동조 ∧ S=정렬 ∧ EMA초입(R5) → 추세 지속 | S3 정배열 초입 |
+| **BREAKOUT** (돌파형) | EXPANSION | VWAP 신선 재탈환 ∧ 거래량 서지(P_VOL) ∧ F=방향 | S2 VWAP+Volume |
 
-RR < `RR_MIN`이면 진입 스킵. 타임스톱 `T_MAX`=7봉(1h45m).
+레짐 라우터(R1) OFF 시: `ORTHO_POLARITIES` 환경변수가 평가할 폴라리티를 지정(BREAKOUT 제외).
+레짐 라우터 ON 시: 국면 자동 판정 → 맞는 폴라리티만 평가(BREAKOUT 포함).
+
+RR < `RR_MIN`이면 진입 스킵. 타임스톱 `T_MAX`=8봉(2h).
 
 ---
 
@@ -59,16 +65,18 @@ RR < `RR_MIN`이면 진입 스킵. 타임스톱 `T_MAX`=7봉(1h45m).
 
 ```
 src/
-├── ortho_config.py    # 12 파라미터 · ALERT_ENABLED · 키
+├── ortho_config.py    # 파라미터 · ALERT_ENABLED · 키
 ├── ortho_data.py      # OKX 수집 (캔들/ls/taker/스프레드)
-├── ortho_engine.py    # L·F·S 3축·진리표·거부권·배리어 (순수·무상태)
+├── ortho_engine.py    # L·F·S 3축·진리표·거부권·배리어·레짐·BREAKOUT (순수·무상태)
 ├── ortho_notify.py    # 텔레그램 ON/OFF
 ├── ortho_notion.py    # Notion 기록/조회/판정
 ├── ortho_resolver.py  # 채점 (triple-barrier)
-├── ortho_main.py      # 진입점 (15분)
+├── ortho_main.py      # 진입점 (15분) — 수집→품질정렬(R6)→승인
 └── timeutil.py        # KST 시각
 
-scripts/migrate_notion_to_ortho.py   # Notion 양식 전환·삭제 (1회)
+scripts/
+├── migrate_notion_to_ortho.py   # Notion 양식 전환·삭제 (1회)
+└── ortho_report.py              # R-기준 성과 리포트 (Polarity·Regime 코호트)
 
 .github/workflows/
 ├── ortho_main.yml       # 신호 생성 15분 cron
@@ -84,7 +92,9 @@ docs/
 
 ---
 
-## 12개 파라미터 (환경변수 오버라이드)
+## 파라미터
+
+### 12개 핵심 파라미터 (환경변수 오버라이드)
 
 | 변수 | 기본 | 역할 |
 |---|---|---|
@@ -98,39 +108,73 @@ docs/
 | `ORTHO_SPREAD_MAX_BPS` | 5 | 스프레드 거부 |
 | `ORTHO_SL_ATR_BUF` | 0.25 | SL 버퍼 |
 | `ORTHO_RR_MIN` | 1.0 | 구조 RR 하한 |
-| `ORTHO_T_MAX` | 7 | 타임스톱 |
-| `ORTHO_MAX_POS_DIR` | 2 | 방향별 슬롯 |
-| `ORTHO_POLARITIES` | `REV,CONT` | 기록할 폴라리티 |
+| `ORTHO_T_MAX` | 8 | 타임스톱(15m봉×8=2h) |
+| `ORTHO_MAX_POS_DIR` | 2 | 방향별 동시 슬롯(심볼별) |
+| `ORTHO_POLARITIES` | `REV,CONT` | 라우터 OFF 시 평가할 폴라리티 |
 
 > 실질 튜닝 대상은 `W_L`·`P_EXT`·`P_FLOW` 3개. 단일 변수 원칙·워크포워드 검증.
 
-### 레짐 라우터 + 도달가능 TP (R1·R2 — 기본 OFF, 단일변수 A/B)
-
-신호기록 분석에서 **실현 기대값 −0.14R**(승률 41.5%·캡처효율 52%·추세장 역행 −41R)이 확인됨.
-두 토글로 구조 보정(둘 다 자기정규화 백분위·ATR → 과적합 표면 아님):
+### 리스크·집행 레이어 (진입 결정과 분리 — 과적합 표면 아님)
 
 | 변수 | 기본 | 역할 |
 |---|---|---|
-| `ORTHO_REGIME_ROUTER` | `false` | **R1.** 국면 판정(RANGE→REV / TREND→CONT / **EXPANSION→BREAKOUT**)으로 맞는 폴라리티만 평가. 추세장 역행·혼탁구조 진입 차단. 롱숏 대칭 불변 |
-| `ORTHO_VOL_HI` | 70 | R1 확장 레짐 변동성 백분위 컷 |
-| `ORTHO_TP_REACH_K` | 0 | **R2.** TP거리 ≤ `K·ATR·√T_MAX` 로 상한(명목RR≠실현R 보정). 0=비활성, 권장 ≈1.2 |
-| `ORTHO_P_VOL` | 70 | **R4.** BREAKOUT 거래량 서지 백분위 컷(절대 150% 대신 자기분포). 라우터 ON·EXPANSION에서만 |
-| `ORTHO_CHASE_K` | 0 | **R5.** CONT 추격 방지: `|진입−EMA_fast| ≤ K·ATR`(절대% 대신). 0=비활성, 권장 ≈1.0 |
-| `ORTHO_CORR_DEDUP` | `false` | **R6.** 동일 실행 후보를 RR 우선 정렬 후 방향 캡 적용(그리디→최선순). 13연패·동질배치 완화 |
+| `ORTHO_RISK_PER_TRADE` | 100 | 거래당 고정 위험(USDT) — C-1 등가-R 사이징 |
+| `ORTHO_BE_TRIGGER_R` | 1.0 | 본전스톱 발동 R (A-1) |
+| `ORTHO_BE_LOCK_R` | 0.05 | 본전스톱 고정 R (A-1) |
+| `ORTHO_MAX_CONCURRENT_DIR` | 3 | 전 심볼 동시 동일방향 한도 (A-3 상관 노출 캡) |
+| `ORTHO_RR_MAX` | 3.0 | TP 상한 RR (A-4 — 타임스톱 내 도달 가능 범위로 TP 축소) |
 
-> **R4 BREAKOUT**(=S2 VWAP+거래량): EXPANSION 국면 전용. 롱=직전종가<VWAP≤현재종가(신선 재탈환)
-> ∧ 거래량서지 ∧ F=상승 ∧ L≠과열, 숏=거울쌍. SL=VWAP±buf(재이탈=무효, 정적). TP=직전 스윙(R2 상한).
-> **R5**(=S3 EMA onset): 연장 추세(데이터 up3/3 −0.21R) 추격을 ATR 이격으로 차단.
-> 켤 때 반드시 **70/30 워크포워드·단일변수**. 신호엔 `RG=레짐` 태그 기록 →
-> `scripts/ortho_report.py` 가 **Polarity·Regime·Regime×Direction 코호트**로 분해(R7).
+### 레짐 라우터 + 구조 보정 (R1–R6 — 기본 OFF, 단일변수 A/B 검증)
+
+아래 진단에 기반한 구조 보정. 모든 컷은 **백분위·ATR 자기정규화**(절대숫자 금지), 기본 OFF, **한 번에 하나** + 70/30 워크포워드 검증.
+
+> **진단:** 초기 195건 신호 분석 → 기대값 **−0.14R/거래** (승률 41.5%, 캡처효율 52%).
+> 주요 누수: ① 추세장 역행 역포지션(−41R), ② TP가 타임스톱 내 미도달(캡처 52%), ③ 상관 손실 클러스터링.
+
+| 변수 | 기본 | 역할 |
+|---|---|---|
+| `ORTHO_REGIME_ROUTER` | `false` | **R1.** 국면 자동 판정(RANGE→REV / TREND→CONT / EXPANSION→BREAKOUT). 추세장 역행 구조 차단. 롱숏 대칭 불변 |
+| `ORTHO_VOL_HI` | 70 | R1 EXPANSION 판정 변동성 백분위 컷 |
+| `ORTHO_TP_REACH_K` | 0 | **R2.** TP거리 ≤ `K·ATR·√T_MAX` 로 상한(명목RR≠실현R 보정). 0=비활성, 권장 첫값 ≈1.2 |
+| `ORTHO_P_VOL` | 70 | **R4.** BREAKOUT 거래량 서지 백분위 컷(절대 150% 대신 자기분포). 라우터 ON·EXPANSION에서만 |
+| `ORTHO_CHASE_K` | 0 | **R5.** CONT 추격 방지: `\|진입−EMA_fast\| ≤ K·ATR`. 0=비활성, 권장 ≈1.0 |
+| `ORTHO_CORR_DEDUP` | `false` | **R6.** 동일 실행 후보를 RR 우선 정렬 후 방향 캡 적용(그리디→최선순). 상관 클러스터 완화 |
+
+#### R1 — 레짐 라우터 상세
+- **RANGE** (다TF EMA 혼재): REV만 허용(평균회귀 — S1 BB+RSI 대응)
+- **TREND** (전 TF EMA 동일방향): CONT만 허용(추세 지속 — S3 정배열 대응)
+- **EXPANSION** (고변동성·부분정렬): BREAKOUT만 허용(거래량 동반 돌파 — S2 VWAP+Volume 대응)
+- 국면 판정은 기존 데이터만 사용(신규 fetch 0). 강추세=전 TF 만장일치(`up==n 또는 up==0`)으로 정의 → RANGE/EXPANSION이 정상 분리됨.
+
+#### R4 — BREAKOUT 폴라리티 상세
+EXPANSION 국면 전용. "거래량 동반 VWAP 신선 재탈환"으로 저확신 확장 진입을 대체:
+- 롱: `직전종가 < VWAP ≤ 현재종가` ∧ `거래량서지 ≥ P_VOL 백분위` ∧ `F=FLOW_UP` ∧ `L≠EXT_HIGH`
+- 숏: 거울쌍
+- SL = VWAP±buf(정적 무효화 — VWAP 재이탈=돌파 실패). TP = 직전 스윙(R2 상한 적용).
+- 거래량 임계는 절대 150%가 아닌 그 코인 자기분포 백분위(P_VOL) → 자기정규화.
+
+#### R5 — 추격 방지 상세
+CONT 진입가와 빠른 EMA(EMA_FAST=9)의 이격을 ATR 배수로 제한:
+- `|entry − EMA_fast| ≤ CHASE_K · ATR` 를 만족해야 진입 허용
+- 성숙·연장 추세(데이터: up3/3 −0.21R)를 ATR 자기정규화 이격으로 차단. 절대 % 임계 없음.
+
+#### R6 — 상관 디둡 상세
+동일 cron 실행 내 후보를 품질(RR) 기준 내림차순 정렬 후 방향 캡(`MAX_CONCURRENT_DIR`) 적용:
+- 기존 그리디(심볼 알파벳순) → 평범한 후보가 슬롯을 선점하고 고품질 후보가 잘림
+- CORR_DEDUP ON → 최선(高RR) 후보부터 방향 슬롯을 채움 → 동질 배치·연속 손실 완화
+
+#### R7 — 레짐 기록 (자동, 신호마다)
+- 신호 dict의 `"regime"` 필드에 `RANGE/TREND/EXPANSION/OFF` 기록
+- Reason 문자열에 `RG=레짐` 태그 포함
+- `scripts/ortho_report.py`가 CSV 내보내기를 읽어 **Polarity·Regime·Regime×Direction** 코호트 분해
 
 ---
 
 ## Notion 스키마 (ORTHO 양식)
 
-`Signal` `Status`(OPEN/WIN/LOSS/TIMEOUT) `Engine`(ORTHO-REV/CONT) `Polarity`(REV/CONT)
+`Signal` `Status`(OPEN/WIN/LOSS/TIMEOUT) `Engine`(ORTHO-REV/CONT/BREAKOUT) `Polarity`(REV/CONT/BREAKOUT)
 `Symbol` `Direction`(LONG/SHORT) `Entry` `TP` `SL` `R Dist` `Bars Limit` `RR`
-`L_pct` `F_pct` `S_state` `MacroTag`(UPLEG/DOWNLEG/FLAT) `Reason`
+`L_pct` `F_pct` `S_state` `MacroTag`(UPLEG/DOWNLEG/FLAT) `Reason`(`RG=레짐` 포함)
 `MFE R` `MAE R` `Bars To Exit` `Signaled At` `Resolved At` `Note`
 
 ---
@@ -147,11 +191,37 @@ docs/
 
 ---
 
+## 성과 리포트
+
+```bash
+python3 scripts/ortho_report.py <notion_export.csv>
+```
+
+Notion DB를 CSV로 내보낸 후 실행. 의존성 없음(표준 라이브러리). 출력:
+- 전체 기대값(R/거래), 승률, 손익비, Profit Factor
+- 캡처 효율(MFE 대비 실현 R), 타임스톱 비율
+- 코호트 분해: **Polarity / Regime / Regime×Direction / Direction / MacroTag / S_state / Symbol / RR bucket**
+- 손실 클러스터링: 동시배치 동질비율, 최장 연속손실
+
+---
+
 ## 빠른 시작
 
-1. zip 적용 후 push (기존 `src/`·workflows 통째 교체)
+1. push 후 Actions 탭에서 `ORTHO Signal Bot (15m)` · `ORTHO Resolver (채점 5m)` 확인
 2. Secrets 확인 + Variable `ALERT_ENABLED=false`
 3. Notion 기록 삭제(스키마는 이미 ORTHO 양식)
-4. 2주 학습 → Notion 데이터 코호트 분석 → 파라미터 보정 → `ALERT_ENABLED=true`
+4. 2주 학습 → Notion CSV 내보내기 → `ortho_report.py` 코호트 분석 → 파라미터 보정 → `ALERT_ENABLED=true`
+
+### R1~R6 단계적 활성화 (학습 데이터 확보 후)
+
+> 모두 기본 OFF. 켤 때는 **한 번에 하나** + 70/30 워크포워드 검증.
+
+```
+# 추천 순서 (데이터 60건+ 확보 후)
+1. ORTHO_REGIME_ROUTER=true     ← 추세장 역행 차단 (가장 큰 누수)
+2. ORTHO_TP_REACH_K=1.2         ← TP 도달가능 상한 (캡처효율 개선)
+3. ORTHO_CHASE_K=1.0            ← CONT 연장추세 진입 차단
+4. ORTHO_CORR_DEDUP=true        ← 상관 배치 품질 정렬
+```
 
 자세한 절차·발전 방법론: [`docs/ORTHO_GUIDE.md`](docs/ORTHO_GUIDE.md)
