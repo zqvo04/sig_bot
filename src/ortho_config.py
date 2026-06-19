@@ -90,15 +90,16 @@ MAX_CONCURRENT_DIR = int(os.getenv("ORTHO_MAX_CONCURRENT_DIR", 3))
 RR_MAX             = float(os.getenv("ORTHO_RR_MAX", 3.0))
 
 # ══════════════════════════════════════════════════════════════════
-# 레짐 라우터 + 도달가능 TP (R1·R2 — 둘 다 기본 OFF로 현 동작 보존, 단일변수 A/B)
+# 레짐 라우터 + 도달가능 TP (R1 기본 ON · R2 기본 OFF, 단일변수 A/B)
 # ──────────────────────────────────────────────────────────────────
-#   R1: 국면(RANGE/TREND/EXPANSION)을 그 코인 자기분포로 판정해 맞는 폴라리티만 평가.
-#       추세장 역행·혼탁구조 진입(데이터 −41R)을 구조 차단. 롱숏 대칭 불변.
+#   R1: 국면(RANGE/TREND/EXPANSION)을 2축(추세효율 ER × 변동성)으로 판정해 맞는 폴라리티만 평가.
+#       추세장 역행·혼탁구조 진입(데이터 −41R)을 구조 차단. 롱숏 대칭 불변. ★ 기본 ON.
 #   R2: 명목 RR≠실현 R(캡처 52%)의 본체 — TP를 ATR·√T_MAX 도달거리로 상한.
-#   둘 다 백분위·ATR 자기정규화 → 곡선맞춤 아님. 켤 때 70/30 워크포워드로 단일검증.
+#   둘 다 백분위·ATR 자기정규화 → 곡선맞춤 아님. R2는 켤 때 70/30 워크포워드로 단일검증.
 # ══════════════════════════════════════════════════════════════════
-REGIME_ROUTER = _flag("ORTHO_REGIME_ROUTER", "false")        # R1 라우터 ON/OFF
+REGIME_ROUTER = _flag("ORTHO_REGIME_ROUTER", "true")         # R1 라우터 ON/OFF (★ 기본 ON)
 VOL_HI        = float(os.getenv("ORTHO_VOL_HI", 70))         # R1 확장 레짐 변동성 백분위 컷
+TREND_ER      = float(os.getenv("ORTHO_TREND_ER", 0.4))      # R1 추세효율(ER) 레벨 컷(0~1, 스케일프리) — 조기 TREND 승격
 # R2 도달가능 TP 계수: TP거리 ≤ K·ATR·√T_MAX. 0=비활성. 권장 첫 검증값 ≈ 1.2.
 TP_REACH_K    = float(os.getenv("ORTHO_TP_REACH_K", 0))
 # R4 BREAKOUT(EXPANSION 전용): 거래량 서지 백분위 컷(절대 150% 대신 자기분포 백분위). 라우터 ON일 때만 가동.
@@ -142,7 +143,7 @@ def summary() -> str:
     return (f"ALERT={'ON' if ALERT_ENABLED else 'OFF(학습)'} "
             f"| W_L={W_L} P_EXT={P_EXT} W_F={W_F} P_FLOW={P_FLOW} RR_MIN={RR_MIN} "
             f"| POLARITIES={','.join(POLARITIES)} "
-            f"| regime={'ON(VOL_HI'+str(int(VOL_HI))+'/P_VOL'+str(int(P_VOL))+')' if REGIME_ROUTER else 'OFF'} "
+            f"| regime={'ON(ER'+format(TREND_ER,'g')+'/vol'+str(int(VOL_HI))+'/pvol'+str(int(P_VOL))+')' if REGIME_ROUTER else 'OFF'} "
             f"reachK={TP_REACH_K:g} chaseK={CHASE_K:g} dedup={'ON' if CORR_DEDUP else 'OFF'} "
             f"| risk={RISK_PER_TRADE:g}U BE@{BE_TRIGGER_R}R/+{BE_LOCK_R}R "
             f"maxDir={MAX_CONCURRENT_DIR} RR_MAX={RR_MAX} "

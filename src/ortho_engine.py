@@ -145,16 +145,25 @@ def axis_structure(candles_15m, candles_1h, candles_4h) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 1-R. 레짐 라우터 (R1 — 국면 전문가만 켠다, 신규 fetch 0)
+# 1-R. 레짐 라우터 (R1 — 국면 전문가만 켠다, 신규 fetch 0)  ★ 기본 ON
 # ────────────────────────────────────────────────────────────────────
 #   현 시스템 최대 누수: 모든 셋업을 모든 국면에서 대칭 난사(추세장 역행 −41R).
 #   각 폴라리티를 "맞는 국면"에서만 허용 → 카운터트렌드/혼탁 진입을 구조 차단.
 #   판정은 전부 그 코인 자기분포 백분위(절대숫자 금지) + 롱숏 대칭 유지.
-#     RANGE     (추세 약 · 변동성 수축) → REV  만 (평균회귀; S1 BB+RSI 대응)
-#     TREND     (다TF EMA 정렬)         → CONT 만 (추세동행; S3 정배열 대응)
-#     EXPANSION (변동성 확장 · 무추세)   → CONT    (돌파 모멘텀; S2 — BREAKOUT 전문화는 R4)
+#     RANGE     (저효율·저변동)        → REV  만 (평균회귀; S1 BB+RSI 대응)
+#     TREND     (고효율 방향성 or 만장일치) → CONT 만 (추세동행; S3 정배열 대응)
+#     EXPANSION (고변동·저효율=혼탁확장)  → BREAKOUT 만 (거래량 VWAP 돌파; S2/R4 대응)
 #   기존 _decide_direction이 폴라리티 안에서 롱/숏을 거울 대칭으로 결정하므로
 #   라우터는 "어떤 폴라리티를 평가할지"만 좁힌다(방향 대칭 불변).
+#
+#   ── 정교화(2축 국면 판정) ───────────────────────────────────────────
+#   다TF EMA `up` 카운트만으로는 부족하다: 3TF에서 up∈{1,2}(부분정렬)가 가장 길고,
+#   "추세 초입(15m·1h 정렬, 4h 지연)"과 "혼탁 레인지"를 구분하지 못한다(4h EMA21은
+#   ~3.5일 지연 → 전 TF 만장일치는 너무 늦다). 두 자기정규화 축을 교차한다:
+#     ① 추세효율(Kaufman ER 레벨, 0~1 스케일프리) — RR류처럼 백분위化 없이 레벨 임계
+#     ② 변동성(정규화 변동폭 백분위) — 코인·가격대 무관 자기정규화
+#   → 고효율+다수TF동조 = TREND(조기 포착) / 고변동+저효율 = EXPANSION / 나머지 = RANGE.
+#   ER은 방향 무관 강도(|순변화|/Σ|봉변화|)이고 방향은 진리표가 결정 → 롱숏 대칭 불변.
 # ════════════════════════════════════════════════════════════════════
 def _norm_range_series(candles_15m) -> list:
     """봉별 정규화 변동폭 (high−low)/close — 코인·가격대 무관 자기정규화."""
@@ -177,16 +186,45 @@ def regime_vol_pct(candles_15m) -> Optional[float]:
     return percentile_rank(means[-1], means)
 
 
+def efficiency_ratio(closes, window) -> Optional[float]:
+    """Kaufman 효율성 비율 = |순변화| / Σ|봉간변화|. 0=완전노이즈(레인지), 1=완전추세.
+    방향 무관 강도(부호 없음) — 방향은 진리표가 결정하므로 롱숏 대칭 불변.
+    ※ ER은 [0,1]로 정규화된 스케일프리 비율(코인·가격대 무관 동일 의미; RR_MIN/RR_MAX 류)이라
+       백분위화하지 않고 '레벨'을 직접 임계한다. (백분위화하면 지속추세=항상高ER→백분위 50으로 붕괴)."""
+    if len(closes) < window + 1:
+        return None
+    seg = closes[-(window + 1):]
+    net = abs(seg[-1] - seg[0])
+    noise = sum(abs(seg[i] - seg[i - 1]) for i in range(1, len(seg)))
+    return (net / noise) if noise > 0 else None
+
+
 def classify_regime(candles_15m, struct) -> str:
-    """국면 판정: TREND(전 TF 동일방향) > EXPANSION(고변동·부분정렬) > RANGE(기본).
-    주의: aligned_up/down은 3TF에서 항상 한쪽이 참(up≤1=down, up≥2=up)이라 레짐 분리 불가 →
-    '강추세'는 전 TF 만장일치(up==n 또는 up==0)로만 정의해야 RANGE/EXPANSION이 살아난다.
+    """2축(추세효율 × 변동성) 국면 판정. 우선순위: TREND > EXPANSION > RANGE.
+
+      TREND     : 전 TF 만장일치(up==n|0)  OR  (ER 레벨 ≥ TREND_ER ∧ 다수TF가 순변화 방향과 일치)
+      EXPANSION : (TREND 아님) ∧ 고변동(vol≥VOL_HI) ∧ 저효율 = 방향 없이 크게 흔들리는 혼탁확장
+      RANGE     : 그 외(저효율·저변동) — 평균회귀 토양
+
+    주의: aligned_up/down은 3TF에서 항상 한쪽이 참이라 레짐 분리 불가. 만장일치(up==n|0)는
+    4h EMA21(~3.5일) 지연으로 너무 늦다 → ER 레벨로 '초입 추세'(up∈{1,2})를 조기 승격하되,
+    EMA 다수 방향과 순변화 부호가 일치할 때만(역추세 반등을 추세로 오인하지 않게) 승격한다.
+    랜덤워크 ER≈1/√window(≈0.22@20), 깨끗한 추세 ER→1 → TREND_ER≈0.4가 둘을 분리.
     """
     n, up = struct["ema_tf_n"], struct["ema_up_count"]
-    if up == n or up == 0:            # 전 타임프레임 동일방향 = 강추세
+    if up == n or up == 0:                       # 전 타임프레임 동일방향 = 강추세
         return "TREND"
+    closes = _closes(candles_15m)
+    er = efficiency_ratio(closes, oc.N_MEAN)     # 스케일프리 레벨(0~1) — 백분위화 금지
+    if er is not None and er >= oc.TREND_ER and len(closes) > oc.N_MEAN:
+        net_up = closes[-1] >= closes[-1 - oc.N_MEAN]
+        # 3TF: up∈{1,2} 중 up>=n-1(=2)=상승 다수, up<=1=하락 다수. 순변화 부호와 일치 시만 승격.
+        if net_up and up >= n - 1:
+            return "TREND"
+        if (not net_up) and up <= 1:
+            return "TREND"
     vol = regime_vol_pct(candles_15m)
-    if vol is not None and vol >= oc.VOL_HI:
+    if vol is not None and vol >= oc.VOL_HI:      # 고변동 + (위에서 걸러진) 저효율 = 혼탁확장
         return "EXPANSION"
     return "RANGE"
 
