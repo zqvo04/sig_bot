@@ -239,6 +239,24 @@ def regime_polarities(regime: str) -> tuple:
     }.get(regime, ())
 
 
+def routed_polarities(regime: str, candles_15m) -> tuple:
+    """L2 라우터 모드 적용. STRICT=레짐당 1폴라리티(현행). SOFT=ER 모호구간만 양폴라리티.
+
+    SOFT 근거: RANGE↔TREND 경계는 ER≈TREND_ER에서 갈리는데, 코인이 이 값 근처로 진동하면
+    적격 폴라리티가 봉마다 깜빡여 "경계 반대편" 셋업(추세초입 눌림/레인지끝 반전)을 놓친다.
+    |ER−TREND_ER|≤ROUTER_SOFT_ER 인 모호구간에서만 (REV,CONT) 둘 다 평가하고, 최종 판정은
+    기존 AND축·VETO·배리어가 한다(난사 아님). 명확한 추세/레인지/EXPANSION은 STRICT와 동일.
+    ER은 방향무관 강도라 롱숏 대칭 불변.
+    """
+    base = regime_polarities(regime)
+    if oc.ROUTER_MODE != "SOFT" or regime not in ("RANGE", "TREND"):
+        return base
+    er = efficiency_ratio(_closes(candles_15m), oc.N_MEAN)
+    if er is not None and abs(er - oc.TREND_ER) <= oc.ROUTER_SOFT_ER:
+        return ("REV", "CONT")        # 모호구간 — 양폴라리티 (중복 제거는 평가 루프가 처리)
+    return base
+
+
 # ════════════════════════════════════════════════════════════════════
 # 1-B. BREAKOUT 셋업 (R4 — S2: VWAP 재탈환 + 거래량 서지, 신규 fetch 0)
 # ────────────────────────────────────────────────────────────────────
@@ -267,10 +285,22 @@ def vol_surge_pct(candles_15m, window) -> Optional[float]:
     return percentile_rank(vols[-1], vols)
 
 
-def _decide_breakout(candles_15m, loc, flow) -> Optional[str]:
-    vwap = loc.get("vwap")
-    if vwap is None:
+def _range_break(candles_15m, cur) -> Optional[str]:
+    """L3 신선 W_F 신고/신저 레인지 돌파. 직전 W_F봉 고저를 현재 종가가 갱신하면 방향 반환.
+    18h VWAP 앵커로는 '신선 재탈환'이 거의 안 켜져 EXPANSION 신호가 ~0 → 고전 레인지 돌파를 OR로 보강."""
+    if not oc.BREAKOUT_RANGE or len(candles_15m) < oc.W_F + 1:
         return None
+    prior = candles_15m[-(oc.W_F + 1):-1]       # 현재봉 직전 W_F봉
+    hi = max(float(c[2]) for c in prior)
+    lo = min(float(c[3]) for c in prior)
+    if cur > hi:
+        return "long"
+    if cur < lo:
+        return "short"
+    return None
+
+
+def _decide_breakout(candles_15m, loc, flow) -> Optional[str]:
     surge = vol_surge_pct(candles_15m, oc.W_L)
     if surge is None or surge < oc.P_VOL:      # 거래량 동반 없으면 돌파 무시
         return None
@@ -279,9 +309,14 @@ def _decide_breakout(candles_15m, loc, flow) -> Optional[str]:
         return None
     prev, cur = closes[-2], closes[-1]
     F, L = flow["state"], loc["state"]
-    if prev < vwap <= cur and F == "FLOW_UP" and L != "EXT_HIGH":
+    vwap = loc.get("vwap")
+    # 트리거 ①: VWAP 신선 재탈환(기존). 트리거 ②(L3): 신선 W_F 레인지 돌파. 둘은 OR.
+    vwap_long  = vwap is not None and prev < vwap <= cur
+    vwap_short = vwap is not None and prev > vwap >= cur
+    rng = _range_break(candles_15m, cur)
+    if (vwap_long or rng == "long") and F == "FLOW_UP" and L != "EXT_HIGH":
         return "long"
-    if prev > vwap >= cur and F == "FLOW_DOWN" and L != "EXT_LOW":
+    if (vwap_short or rng == "short") and F == "FLOW_DOWN" and L != "EXT_LOW":
         return "short"
     return None
 
@@ -377,18 +412,42 @@ def build_barriers(polarity, direction, entry, candles_15m, loc) -> Optional[dic
 # ════════════════════════════════════════════════════════════════════
 # 4. 폴라리티별 진리표
 # ════════════════════════════════════════════════════════════════════
-def _decide_direction(polarity, loc, flow, struct) -> Optional[str]:
-    L, F, Lpct = loc["state"], flow["state"], loc["L_pct"]
+def _flow_up_ok(flow, context) -> bool:
+    """흐름 상승 동조. 기본=캔들프록시 F==FLOW_UP. L4②: taker CVD 매수우위면 OR-확인
+    (단 캔들 F가 명백히 하락(FLOW_DOWN)일 땐 무효 — taker가 명백한 역흐름을 덮어쓰지 않음)."""
+    if flow["state"] == "FLOW_UP":
+        return True
+    if oc.FLOW_TAKER_CONFIRM and flow["state"] != "FLOW_DOWN":
+        tk = (context or {}).get("taker") or {}
+        if tk.get("available") and tk.get("buy_ratio", 0.5) >= oc.FLOW_TAKER_MIN:
+            return True
+    return False
+
+
+def _flow_down_ok(flow, context) -> bool:
+    """_flow_up_ok 의 거울쌍(롱숏 대칭)."""
+    if flow["state"] == "FLOW_DOWN":
+        return True
+    if oc.FLOW_TAKER_CONFIRM and flow["state"] != "FLOW_UP":
+        tk = (context or {}).get("taker") or {}
+        if tk.get("available") and tk.get("sell_ratio", 0.5) >= oc.FLOW_TAKER_MIN:
+            return True
+    return False
+
+
+def _decide_direction(polarity, loc, flow, struct, context=None) -> Optional[str]:
+    L, Lpct = loc["state"], loc["L_pct"]
+    f_up, f_dn = _flow_up_ok(flow, context), _flow_down_ok(flow, context)
     lo, mid, hi = oc.cont_pullback_band()
     if polarity == "REV":
-        if L == "EXT_LOW" and F == "FLOW_UP" and not struct["broken_long"]:
+        if L == "EXT_LOW" and f_up and not struct["broken_long"]:
             return "long"
-        if L == "EXT_HIGH" and F == "FLOW_DOWN" and not struct["broken_short"]:
+        if L == "EXT_HIGH" and f_dn and not struct["broken_short"]:
             return "short"
         return None
-    if (lo <= Lpct < mid) and F == "FLOW_UP" and struct["aligned_up"]:
+    if (lo <= Lpct < mid) and f_up and struct["aligned_up"]:
         return "long"
-    if (mid < Lpct <= hi) and F == "FLOW_DOWN" and struct["aligned_down"]:
+    if (mid < Lpct <= hi) and f_dn and struct["aligned_down"]:
         return "short"
     return None
 
@@ -423,7 +482,7 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
     #   라우터 ON 시 라우터가 권위(POLARITIES 환경변수 대체) → EXPANSION→BREAKOUT 평가 가능.
     if oc.REGIME_ROUTER:
         regime = classify_regime(c15, struct)
-        polarities = regime_polarities(regime)
+        polarities = routed_polarities(regime, c15)   # L2 STRICT/SOFT
         if not polarities:
             logger.info(f"[engine] {symbol} 레짐={regime} → 허용 폴라리티 없음, 스킵")
             return []
@@ -437,7 +496,7 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
         if polarity == "BREAKOUT":
             direction = _decide_breakout(c15, loc, flow)
         else:
-            direction = _decide_direction(polarity, loc, flow, struct)
+            direction = _decide_direction(polarity, loc, flow, struct, context)
         if direction is None:
             continue
         # R5 추격 방지: CONT(추세동행)는 빠른 EMA 근처(초입)에서만. 연장 추세 진입 차단.
