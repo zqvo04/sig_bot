@@ -35,4 +35,10 @@ jobs:
           OKX_PASSPHRASE:     ${{ secrets.OKX_PASSPHRASE }}
           NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          LOG_LEVEL:          ${{ vars.LOG_LEVEL }}
+          # 채점 정합: 생성기와 동일한 본전스톱·보유한도를 써야 라벨이 일관(불일치 시 WIN/LOSS 왜곡).
+          ORTHO_BE_TRIGGER_R: ${{ vars.ORTHO_BE_TRIGGER_R }}
+          ORTHO_BE_LOCK_R:    ${{ vars.ORTHO_BE_LOCK_R }}
+          ORTHO_T_MAX:        ${{ vars.ORTHO_T_MAX }}
+          ORTHO_RESOLVER_MAX: ${{ vars.ORTHO_RESOLVER_MAX }}
         run: python src/ortho_resolver.py

@@ -141,6 +141,29 @@ docs/
 | `ORTHO_P_VOL` | 70 | **R4.** BREAKOUT 거래량 서지 백분위 컷(절대 150% 대신 자기분포). 라우터 ON·EXPANSION에서만 |
 | `ORTHO_CHASE_K` | 0 | **R5.** CONT 추격 방지: `\|진입−EMA_fast\| ≤ K·ATR`. 0=비활성, 권장 ≈1.0 |
 | `ORTHO_CORR_DEDUP` | `false` | **R6.** 동일 실행 후보를 RR 우선 정렬 후 방향 캡 적용(그리디→최선순). 상관 클러스터 완화 |
+| `ORTHO_ROUTER_MODE` | `STRICT` | **L2.** `SOFT`면 ER 모호구간(`\|ER−TREND_ER\|≤SOFT_ER`)에서 REV·CONT 둘 다 평가(경계 깜빡임 누락 회수). `STRICT`=현행 |
+| `ORTHO_ROUTER_SOFT_ER` | 0.1 | L2 SOFT 모호구간 폭(ER 레벨). `ROUTER_MODE=SOFT`에서만 |
+| `ORTHO_BREAKOUT_RANGE` | `false` | **L3.** ON 시 BREAKOUT 트리거에 '신선 W_F 신고/신저 레인지 돌파'를 OR 추가(EXPANSION 신호 회복). 게이트 동일 |
+| `ORTHO_N_5M_FETCH` | 48 | **L4①.** 흐름 분포 표본 수(5m). 72로 늘리면 F 백분위 노이즈↓(자기정규화 유지) |
+| `ORTHO_FLOW_TAKER_CONFIRM` | `false` | **L4②.** ON 시 taker CVD 동조를 흐름축 OR-확인으로 재사용(늦은-흐름 회수). 캔들 F가 명백 역방향이면 무효 |
+| `ORTHO_FLOW_TAKER_MIN` | 0.55 | L4② taker 동조 인정 매수/매도 비율 하한 |
+
+#### L1~L4 — 누락(미진입) 회수 업그레이드 (전수점검 기반)
+
+스캘핑에서 **놓치는 좋은 순간(false negative)**을 과적합 없이 메우는 4개 보강. 전부 자기정규화·롱숏
+대칭이며 **기본값=현행 보존**(L1만 즉시 적용, 나머지는 토글 단일변수 A/B).
+- **L1 (즉시 적용):** CONT 눌림 밴드 바닥을 `P_EXT`→`0`. 라우터가 TREND에서 REV를 금지하는 동안
+  **강추세 속 깊은 눌림(`L_pct<10`, A+ 매수자리)**이 REV=금지·CONT=밴드밖으로 통째 누락되던 사각지대 해소.
+  FLOW·구조 AND 가드 유지 → 끝물 오인 방지. 신규 파라미터 0, 완전 대칭.
+- **L2 (`ORTHO_ROUTER_MODE=SOFT`):** ER≈TREND_ER 경계 진동으로 폴라리티 적격이 깜빡여 "경계 반대편"
+  셋업을 놓치는 누락을, 모호구간에서만 양폴라리티 평가로 회수(최종 판정은 기존 AND축·VETO).
+- **L3 (`ORTHO_BREAKOUT_RANGE=true`):** 18h VWAP 앵커 탓에 EXPANSION 신호가 ~0이던 것을 고전
+  레인지 돌파 트리거로 부활.
+- **L4 (`ORTHO_FLOW_TAKER_CONFIRM=true` / `ORTHO_N_5M_FETCH=72`):** 흐름축 표본 확대 + 이미 수집 중인
+  taker CVD를 확인용으로 재사용해 '이미 반전한 흐름'만 요구하던 지각·누락을 보완.
+
+> 워크플로 배선(W2): 위 모든 `ORTHO_*` 노브가 `ortho_main.yml`/`ortho_resolver.yml` env로 연결됨 —
+> GitHub Variables 설정이 실제 런타임에 반영된다(이전엔 `ALERT_ENABLED`·`ORTHO_POLARITIES`만 전달됨).
 
 #### R1 — 레짐 라우터 상세 (2축 판정: 추세효율 × 변동성)
 

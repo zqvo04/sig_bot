@@ -100,6 +100,11 @@ RR_MAX             = float(os.getenv("ORTHO_RR_MAX", 3.0))
 REGIME_ROUTER = _flag("ORTHO_REGIME_ROUTER", "true")         # R1 라우터 ON/OFF (★ 기본 ON)
 VOL_HI        = float(os.getenv("ORTHO_VOL_HI", 70))         # R1 확장 레짐 변동성 백분위 컷
 TREND_ER      = float(os.getenv("ORTHO_TREND_ER", 0.4))      # R1 추세효율(ER) 레벨 컷(0~1, 스케일프리) — 조기 TREND 승격
+# R1-S SOFT 라우터(L2): STRICT(기본)=레짐당 폴라리티 1개(현행). SOFT=레짐 경계 모호구간에서만 양폴라리티 평가.
+#   경계 깜빡임(ER≈TREND_ER 진동)으로 "경계 반대편" 셋업을 놓치는 누락을 회수. 기본 STRICT라 현행 보존.
+#   확장은 ER 모호구간(|ER−TREND_ER|≤ROUTER_SOFT_ER)에서만 → 명확한 추세/레인지는 그대로 단일폴라리티.
+ROUTER_MODE    = os.getenv("ORTHO_ROUTER_MODE", "STRICT").strip().upper()  # STRICT | SOFT
+ROUTER_SOFT_ER = float(os.getenv("ORTHO_ROUTER_SOFT_ER", 0.1))            # SOFT 모호구간 폭(ER 레벨)
 # R2 도달가능 TP 계수: TP거리 ≤ K·ATR·√T_MAX. 0=비활성. 권장 첫 검증값 ≈ 1.2.
 TP_REACH_K    = float(os.getenv("ORTHO_TP_REACH_K", 0))
 # R4 BREAKOUT(EXPANSION 전용): 거래량 서지 백분위 컷(절대 150% 대신 자기분포 백분위). 라우터 ON일 때만 가동.
@@ -108,6 +113,13 @@ P_VOL         = float(os.getenv("ORTHO_P_VOL", 70))
 CHASE_K       = float(os.getenv("ORTHO_CHASE_K", 0))
 # R6 상관 디둡: 동일 실행 내 후보를 품질(RR) 우선 정렬 후 방향 캡 적용(그리디→최선순). 기본 OFF.
 CORR_DEDUP    = _flag("ORTHO_CORR_DEDUP", "false")
+# L3 EXPANSION 돌파 부활: ON 시 BREAKOUT 트리거에 '신선 W_F 신고/신저 레인지 돌파'를 OR로 추가
+#   (VWAP 재탈환만으로는 18h 앵커라 거의 안 켜짐 → 고변동 국면 신호 ~0). 게이트(vol서지·flow·L과열)는 동일.
+BREAKOUT_RANGE = _flag("ORTHO_BREAKOUT_RANGE", "false")
+# L4 흐름축 보강: taker CVD(이미 수집)를 flow 확인 OR로 재사용 → 캔들프록시 F가 늦을 때 늦은-흐름 회수.
+#   동조 강도 임계(0.5=중립). 기본 OFF=현행(캔들프록시 단독). 신규 데이터 의존 0.
+FLOW_TAKER_CONFIRM = _flag("ORTHO_FLOW_TAKER_CONFIRM", "false")
+FLOW_TAKER_MIN     = float(os.getenv("ORTHO_FLOW_TAKER_MIN", 0.55))   # taker 동조로 인정할 매수/매도 비율 하한
 
 # ── 상속 고정 (업계 표준 · 튜닝 금지 · 예산 비산입) ─────────────────
 N_ATR        = 14
@@ -118,7 +130,9 @@ TF_FLOW      = "5m"
 TF_MID       = "1h"
 TF_MACRO     = "4h"
 N_15M_FETCH  = 200
-N_5M_FETCH   = 48
+# L4① 흐름 분포 안정화: 5m fetch 수를 env화(기본 48=현행). F 백분위 표본이 ~24로 점프하므로
+#   72로 늘리면 분포가 매끄러워져 노이즈성 누락↓. 자기정규화 유지(절대값 아님) → 단일변수 A/B.
+N_5M_FETCH   = int(os.getenv("ORTHO_N_5M_FETCH", 48))
 N_HTF_FETCH  = 60      # 1h/4h 구조축용
 
 # ── 폴라리티: 어떤 셋업을 기록할지 ───────────────────────────────
@@ -135,16 +149,26 @@ RESOLVER_MAX_OPEN_PER_RUN = int(os.getenv("ORTHO_RESOLVER_MAX", 100))
 
 
 def cont_pullback_band():
-    """연속형 눌림목 백분위 밴드: (하한, 중심, 상한)."""
-    return (P_EXT, 50.0, 100.0 - P_EXT)
+    """연속형 눌림목 백분위 밴드: (하한, 중심, 상한).
+
+    L1 사각지대 해소: 하한=0·상한=100. 기존엔 (P_EXT,50,100-P_EXT)라 CONT 롱이 L_pct∈[10,50)만
+    인정 → L_pct<10(EXT_LOW)은 REV 담당이었으나, 라우터가 TREND에서 REV를 금지해 **강추세 속 깊은
+    눌림(A+ 매수자리)**이 어떤 폴라리티에도 안 걸려 누락됐다. 바닥을 0으로 내려 깊은 눌림까지 CONT가
+    담당(FLOW=동조·구조=정렬 AND 가드가 끝물 오인을 막음). 롱숏 완전 대칭. 신규 파라미터 0.
+    ※ 비라우터(POLARITIES=REV,CONT) 모드 한정으로 극단에서 REV·CONT가 동시 성립(2중 확인) 가능 —
+       드물고 MAX_POS_DIR로 통제. 라우터 기본 ON에선 폴라리티 배타라 중복 없음.
+    """
+    return (0.0, 50.0, 100.0)
 
 
 def summary() -> str:
     return (f"ALERT={'ON' if ALERT_ENABLED else 'OFF(학습)'} "
             f"| W_L={W_L} P_EXT={P_EXT} W_F={W_F} P_FLOW={P_FLOW} RR_MIN={RR_MIN} "
             f"| POLARITIES={','.join(POLARITIES)} "
-            f"| regime={'ON(ER'+format(TREND_ER,'g')+'/vol'+str(int(VOL_HI))+'/pvol'+str(int(P_VOL))+')' if REGIME_ROUTER else 'OFF'} "
+            f"| regime={'ON('+ROUTER_MODE+',ER'+format(TREND_ER,'g')+'/vol'+str(int(VOL_HI))+'/pvol'+str(int(P_VOL))+')' if REGIME_ROUTER else 'OFF'} "
             f"reachK={TP_REACH_K:g} chaseK={CHASE_K:g} dedup={'ON' if CORR_DEDUP else 'OFF'} "
+            f"brkRange={'ON' if BREAKOUT_RANGE else 'OFF'} "
+            f"takerF={'ON' if FLOW_TAKER_CONFIRM else 'OFF'} n5m={N_5M_FETCH} "
             f"| risk={RISK_PER_TRADE:g}U BE@{BE_TRIGGER_R}R/+{BE_LOCK_R}R "
             f"maxDir={MAX_CONCURRENT_DIR} RR_MAX={RR_MAX} "
             f"| notion={'ON' if NOTION_ENABLED else 'OFF'}")

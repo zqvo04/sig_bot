@@ -41,6 +41,43 @@ jobs:
           # 학습기간(2주)에는 미설정/false → 알림 OFF, 기록·채점만.
           # 학습 완료 후 Variables 에서 ALERT_ENABLED=true 로 변경 → 알림 ON.
           ALERT_ENABLED:      ${{ vars.ALERT_ENABLED }}
-          # 선택: 파라미터 오버라이드 (미설정 시 기본값)
-          ORTHO_POLARITIES:   ${{ vars.ORTHO_POLARITIES }}
+          LOG_LEVEL:          ${{ vars.LOG_LEVEL }}
+          SINGLE_SYMBOL:      ${{ vars.SINGLE_SYMBOL }}
+          # ── 파라미터 오버라이드 (미설정 시 코드 기본값) ──
+          # 가이드 Phase 3 의 단일변수 A/B 노브를 전부 런타임에 연결한다(미설정=빈값→기본값 유지).
+          ORTHO_POLARITIES:       ${{ vars.ORTHO_POLARITIES }}
+          # 진입 12파라미터
+          ORTHO_W_L:              ${{ vars.ORTHO_W_L }}
+          ORTHO_P_EXT:            ${{ vars.ORTHO_P_EXT }}
+          ORTHO_N_MEAN:           ${{ vars.ORTHO_N_MEAN }}
+          ORTHO_W_F:              ${{ vars.ORTHO_W_F }}
+          ORTHO_P_FLOW:           ${{ vars.ORTHO_P_FLOW }}
+          ORTHO_LS_CROWD_VETO:    ${{ vars.ORTHO_LS_CROWD_VETO }}
+          ORTHO_TAKER_VETO:       ${{ vars.ORTHO_TAKER_VETO }}
+          ORTHO_SPREAD_MAX_BPS:   ${{ vars.ORTHO_SPREAD_MAX_BPS }}
+          ORTHO_SL_ATR_BUF:       ${{ vars.ORTHO_SL_ATR_BUF }}
+          ORTHO_RR_MIN:           ${{ vars.ORTHO_RR_MIN }}
+          ORTHO_T_MAX:            ${{ vars.ORTHO_T_MAX }}
+          ORTHO_MAX_POS_DIR:      ${{ vars.ORTHO_MAX_POS_DIR }}
+          # 리스크·집행 레이어
+          ORTHO_RISK_PER_TRADE:   ${{ vars.ORTHO_RISK_PER_TRADE }}
+          ORTHO_BE_TRIGGER_R:     ${{ vars.ORTHO_BE_TRIGGER_R }}
+          ORTHO_BE_LOCK_R:        ${{ vars.ORTHO_BE_LOCK_R }}
+          ORTHO_MAX_CONCURRENT_DIR: ${{ vars.ORTHO_MAX_CONCURRENT_DIR }}
+          ORTHO_RR_MAX:           ${{ vars.ORTHO_RR_MAX }}
+          # 레짐 라우터(R1) + 도달가능 TP(R2) + R4~R6
+          ORTHO_REGIME_ROUTER:    ${{ vars.ORTHO_REGIME_ROUTER }}
+          ORTHO_VOL_HI:           ${{ vars.ORTHO_VOL_HI }}
+          ORTHO_TREND_ER:         ${{ vars.ORTHO_TREND_ER }}
+          ORTHO_TP_REACH_K:       ${{ vars.ORTHO_TP_REACH_K }}
+          ORTHO_P_VOL:            ${{ vars.ORTHO_P_VOL }}
+          ORTHO_CHASE_K:          ${{ vars.ORTHO_CHASE_K }}
+          ORTHO_CORR_DEDUP:       ${{ vars.ORTHO_CORR_DEDUP }}
+          # 신규 토글(L2 SOFT 라우터 / L3 돌파부활 / L4 흐름보강) — 기본 STRICT/OFF=현행 보존
+          ORTHO_ROUTER_MODE:      ${{ vars.ORTHO_ROUTER_MODE }}
+          ORTHO_ROUTER_SOFT_ER:   ${{ vars.ORTHO_ROUTER_SOFT_ER }}
+          ORTHO_BREAKOUT_RANGE:   ${{ vars.ORTHO_BREAKOUT_RANGE }}
+          ORTHO_N_5M_FETCH:       ${{ vars.ORTHO_N_5M_FETCH }}
+          ORTHO_FLOW_TAKER_CONFIRM: ${{ vars.ORTHO_FLOW_TAKER_CONFIRM }}
+          ORTHO_FLOW_TAKER_MIN:   ${{ vars.ORTHO_FLOW_TAKER_MIN }}
         run: python src/ortho_main.py
