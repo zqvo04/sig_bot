@@ -98,8 +98,11 @@ def fetch_taker(symbol: str) -> dict:
         rows = resp.get("data", [])
         if not rows:
             return neutral
-        buy = sum(float(r[1]) for r in rows)
-        sell = sum(float(r[2]) for r in rows)
+        # OKX taker-volume-contract 응답 = [ts, sellVol, buyVol] → r[1]=매도, r[2]=매수.
+        #   (실데이터 검증: r[1]-비중 높은 5m봉의 양봉률 25% vs 낮은 봉 78%, n≈1만 → r[1]=매도 확정)
+        #   기존엔 buy=r[1]/sell=r[2]로 뒤바뀌어 역방향 거부권이 거꾸로(승자 제거) 작동했음.
+        sell = sum(float(r[1]) for r in rows)
+        buy  = sum(float(r[2]) for r in rows)
         tot = buy + sell
         if tot <= 0:
             return neutral
