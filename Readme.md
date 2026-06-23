@@ -147,6 +147,8 @@ docs/
 | `ORTHO_N_5M_FETCH` | 48 | **L4①.** 흐름 분포 표본 수(5m). 72로 늘리면 F 백분위 노이즈↓(자기정규화 유지) |
 | `ORTHO_FLOW_TAKER_CONFIRM` | `false` | **L4②.** ON 시 taker CVD 동조를 흐름축 OR-확인으로 재사용(늦은-흐름 회수). 캔들 F가 명백 역방향이면 무효 |
 | `ORTHO_FLOW_TAKER_MIN` | 0.55 | L4② taker 동조 인정 매수/매도 비율 하한 |
+| `ORTHO_MACRO_FRESH` | `false` | **M1 분류기 지연제거.** ON 시 상위TF(1h·4h) fast-EMA **기울기**가 거래 방향과 명백히 반대면 차단(차단 전용 거부권). 느린 EMA '교차'의 천장/바닥 지연으로 생기는 stale-side 진입(상승장 막판 롱·하락전환 저점 롱·상승장 숏) 차단. 부호만 사용·롱숏 대칭·신규 fetch 0 |
+| `ORTHO_MACRO_FRESH_LB` | 2 | M1 fast-EMA 기울기 룩백(상위TF봉). 작을수록 민감 |
 
 #### L1~L4 — 누락(미진입) 회수 업그레이드 (전수점검 기반)
 
@@ -164,6 +166,21 @@ docs/
 
 > 워크플로 배선(W2): 위 모든 `ORTHO_*` 노브가 `ortho_main.yml`/`ortho_resolver.yml` env로 연결됨 —
 > GitHub Variables 설정이 실제 런타임에 반영된다(이전엔 `ALERT_ENABLED`·`ORTHO_POLARITIES`만 전달됨).
+
+#### M1 — 분류기 지연제거 (false-positive 차단 · L1~L4의 거울쌍)
+
+L1~L4가 "놓친 좋은 진입(false negative)"을 메웠다면, M1은 **"하지 말았어야 할 진입(false positive)"**을 줄인다.
+추세 판정의 권위가 느린 EMA **교차**(fast>slow level)에 있어 천장/바닥에서 ~수 시간~일 지연 → 전환
+직후에도 분류기가 TREND/UPLEG로 오태깅 → **stale-side 진입**(상승장 막판 롱·하락전환 저점 롱·상승장 숏).
+- **진단(263건 실현 R 검증):** `counter-trend`(4h 레그 역행) ExpR −0.20R·PF 0.58, 70/30 양 구간 음(陰).
+  특히 `counter SHORT·UPLEG`(상승장 숏) 한 코호트가 **−19.8R**(전체 순손실 −9.0R 초과). 6/23 당일은
+  롱 5건 전패(−5R) — 4h가 하락전환을 못 따라잡아 TREND/UPLEG로 오태깅한 막판/저점 롱.
+- **교정:** `ORTHO_MACRO_FRESH=true` 시 상위TF(1h·4h) fast-EMA **기울기**(level 아님)가 거래 방향과
+  명백히 반대면 차단. slope는 교차보다 전환을 수 봉 내 포착 → 지연↓. **15m이 아닌 상위TF에만** 적용해
+  건강한 눌림목 진입은 보존(상위TF가 여전히 거래방향으로 기울면 비차단). 혼조(fresh=0)도 비차단.
+- 부호만 사용(절대임계 0=자기정규화) · 롱숏 완전 대칭 · 차단 전용(점수 가산 금지) · 신규 fetch 0.
+- **한계(정직히):** EMA 기울기도 전환 '첫 봉'은 못 잡음(지연 0 불가). 효과는 라우터 표본 n≥30·70/30
+  검증 전엔 미확정 → **기본 OFF**, 단일변수 A/B로만 켤 것.
 
 #### R1 — 레짐 라우터 상세 (2축 판정: 추세효율 × 변동성)
 

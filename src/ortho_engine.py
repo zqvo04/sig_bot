@@ -8,7 +8,7 @@ ortho_engine.py — ORTHO-3 직교 3축 합의 엔진 (자립형) [TARGET: 15분
   [축 L] 위치  : (close−SMA)/ATR 의 W_L 분포 백분위
   [축 F] 흐름  : CVD 프록시(캔들 모멘텀) 슬라이딩 백분위
   [축 S] 구조  : 다TF(15m/1h/4h) EMA 정렬 + 신선 돌파
-  [VETO]       : 군중 과밀(LS) / Taker 역방향 / 호가 스프레드
+  [VETO]       : 군중 과밀(LS) / Taker 역방향 / 호가 스프레드 / (옵션)상위TF 추세지연(MACRO_FRESH)
 
 폴라리티 (R1 레짐 라우터가 국면별로 택일; 라우터 OFF면 POLARITIES 환경변수):
   REV   회귀형 : L=극단 ∧ F=반전 ∧ ¬S_broken → 평균 회귀   (RANGE 국면)
@@ -334,6 +334,36 @@ def _within_chase(candles_15m, entry, atr) -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════
+# 1-D. 분류기 지연제거 (MACRO_FRESH — fast-EMA 기울기로 EMA교차 지연 보정)  ★ 기본 OFF
+# ────────────────────────────────────────────────────────────────────
+#   추세 판정의 권위가 느린 EMA '교차'(fast>slow level)에 있으면 천장/바닥에서 ~수 시간~일
+#   지연된다 → 전환 직후에도 분류기가 TREND/UPLEG로 오태깅 → CONT 롱·REV 저점 롱이 하락전환
+#   직후에도 발사(6/23 롱 5전패), 상승장 숏(−19.8R)이 누적. 'level 교차' 대신 fast-EMA '기울기'
+#   (slope)는 전환을 수 봉 내 포착 → 지연 대폭↓. 15m 눌림이 아니라 상위TF(1h·4h)에만 적용해
+#   건강한 눌림목 진입은 보존(상위TF가 여전히 거래방향으로 기울면 비차단). 부호만 사용(절대임계
+#   0=자기정규화) · 롱숏 완전 대칭 · 차단 전용(점수 가산 금지) · 신규 fetch 0(이미 받은 1h/4h 재사용).
+# ════════════════════════════════════════════════════════════════════
+def ema_slope_sign(closes, period, lb) -> int:
+    """fast-EMA 기울기 부호: +1 상승 / -1 하락 / 0 평탄·판정불가. lb봉 전 EMA와 비교(level 아님)."""
+    if lb <= 0 or len(closes) < period + lb:
+        return 0
+    e_now, e_prev = ema(closes, period), ema(closes[:-lb], period)
+    if e_now is None or e_prev is None:
+        return 0
+    return 1 if e_now > e_prev else (-1 if e_now < e_prev else 0)
+
+
+def htf_fresh_sign(candles_1h, candles_4h, lb) -> int:
+    """상위TF(1h·4h) 신선 추세 부호 합의: 둘 다 같은 방향=그 부호, 정반대=0(혼조→비차단),
+    한쪽만 결정적=그 부호. 느린 EMA 교차 대신 fast-EMA 기울기로 전환 조기 포착. 신규 fetch 0."""
+    s1 = ema_slope_sign(_closes(candles_1h), oc.EMA_FAST, lb) if candles_1h else 0
+    s4 = ema_slope_sign(_closes(candles_4h), oc.EMA_FAST, lb) if candles_4h else 0
+    if s1 == s4:
+        return s1
+    return s4 if s1 == 0 else (s1 if s4 == 0 else 0)   # 정반대 부호 → 혼조, 차단 안 함
+
+
+# ════════════════════════════════════════════════════════════════════
 # 2. 맥락 거부권 (차단 전용)
 # ════════════════════════════════════════════════════════════════════
 def context_veto(direction, context, spread_bps) -> Optional[str]:
@@ -503,6 +533,14 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
         if polarity == "CONT" and not _within_chase(c15, entry, loc["atr"]):
             logger.info(f"[engine] {symbol} CONT {direction} 추격(>CHASE_K·ATR) 스킵")
             continue
+        # 분류기 지연제거(MACRO_FRESH): 상위TF fast-EMA '기울기'가 거래 방향과 명백히 반대면 차단.
+        #   느린 EMA 교차 지연으로 stale-side(상승장 막판 롱·하락전환 저점 롱·상승장 숏)에 진입하는
+        #   것을 막는다. 혼조(fresh=0)면 비차단 → 건강한 눌림목·진짜 레인지는 보존. 롱숏 대칭.
+        if oc.MACRO_FRESH:
+            fresh = htf_fresh_sign(c1h, c4h, oc.MACRO_FRESH_LB)
+            if (direction == "long" and fresh < 0) or (direction == "short" and fresh > 0):
+                logger.info(f"[engine] {symbol} {polarity} {direction} 신선도veto(상위TF추세역전 fresh={fresh})")
+                continue
         if spread is None:
             spread = od.fetch_spread_bps(exchange, symbol)
         veto = context_veto(direction, context, spread)
