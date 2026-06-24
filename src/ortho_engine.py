@@ -8,7 +8,7 @@ ortho_engine.py — ORTHO-3 직교 3축 합의 엔진 (자립형) [TARGET: 15분
   [축 L] 위치  : (close−SMA)/ATR 의 W_L 분포 백분위
   [축 F] 흐름  : CVD 프록시(캔들 모멘텀) 슬라이딩 백분위
   [축 S] 구조  : 다TF(15m/1h/4h) EMA 정렬 + 신선 돌파
-  [VETO]       : 군중 과밀(LS) / Taker 역방향 / 호가 스프레드 / (옵션)상위TF 추세지연(MACRO_FRESH)
+  [VETO]       : 군중 과밀(LS) / Taker 역방향 / 호가 스프레드 / 상위TF 추세지연(MACRO_FRESH, 기본 ON)
 
 폴라리티 (R1 레짐 라우터가 국면별로 택일; 라우터 OFF면 POLARITIES 환경변수):
   REV   회귀형 : L=극단 ∧ F=반전 ∧ ¬S_broken → 평균 회귀   (RANGE 국면)
@@ -334,7 +334,7 @@ def _within_chase(candles_15m, entry, atr) -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 1-D. 분류기 지연제거 (MACRO_FRESH — fast-EMA 기울기로 EMA교차 지연 보정)  ★ 기본 OFF
+# 1-D. 분류기 지연제거 (MACRO_FRESH — fast-EMA 기울기로 EMA교차 지연 보정)  ★ 기본 ON
 # ────────────────────────────────────────────────────────────────────
 #   추세 판정의 권위가 느린 EMA '교차'(fast>slow level)에 있으면 천장/바닥에서 ~수 시간~일
 #   지연된다 → 전환 직후에도 분류기가 TREND/UPLEG로 오태깅 → CONT 롱·REV 저점 롱이 하락전환

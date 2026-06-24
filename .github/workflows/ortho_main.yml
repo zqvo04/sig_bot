@@ -80,7 +80,7 @@ jobs:
           ORTHO_N_5M_FETCH:       ${{ vars.ORTHO_N_5M_FETCH }}
           ORTHO_FLOW_TAKER_CONFIRM: ${{ vars.ORTHO_FLOW_TAKER_CONFIRM }}
           ORTHO_FLOW_TAKER_MIN:   ${{ vars.ORTHO_FLOW_TAKER_MIN }}
-          # 분류기 지연제거(MACRO_FRESH) — 상위TF fast-EMA 기울기 거부권. 기본 OFF=현행 보존
+          # 분류기 지연제거(MACRO_FRESH) — 상위TF fast-EMA 기울기 거부권. ★ 기본 ON(미설정 시 코드 기본 true)
           ORTHO_MACRO_FRESH:      ${{ vars.ORTHO_MACRO_FRESH }}
           ORTHO_MACRO_FRESH_LB:   ${{ vars.ORTHO_MACRO_FRESH_LB }}
         run: python src/ortho_main.py

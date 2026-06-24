@@ -144,14 +144,16 @@ BREAKOUT_RANGE = _flag("ORTHO_BREAKOUT_RANGE", "false")
 #   동조 강도 임계(0.5=중립). 기본 OFF=현행(캔들프록시 단독). 신규 데이터 의존 0.
 FLOW_TAKER_CONFIRM = _flag("ORTHO_FLOW_TAKER_CONFIRM", "false")
 FLOW_TAKER_MIN     = _float("ORTHO_FLOW_TAKER_MIN", 0.55)   # taker 동조로 인정할 매수/매도 비율 하한
-# ── 분류기 지연제거 (MACRO_FRESH — 차단 전용 거부권, 기본 OFF=현행 보존) ──────────
+# ── 분류기 지연제거 (MACRO_FRESH — 차단 전용 거부권, ★ 기본 ON) ──────────
 #   진단: 추세 판정의 권위가 느린 EMA '교차'(4h EMA9>EMA21)에 있어 천장/바닥에서 ~수 시간~일
 #   지연 → 전환 직후에도 분류기가 TREND/UPLEG로 오태깅 → stale-side 진입(상승장 막판 롱·하락전환
 #   저점 롱·상승장 숏). 데이터: '상승장 숏'(counter SHORT·UPLEG) 한 코호트가 −19.8R(전체 순손실 초과).
 #   교정: 상위TF(1h·4h) fast-EMA '기울기'(level 아닌 slope)가 거래 방향과 명백히 반대면 차단.
 #   slope는 교차보다 전환을 수 봉 내 포착(지연↓). 15m이 아닌 상위TF에만 적용 → 건강한 눌림목 보존
 #   (상위TF가 여전히 거래방향으로 기울면 비차단). 부호만 사용(절대임계 0=자기정규화)·롱숏 완전 대칭.
-MACRO_FRESH    = _flag("ORTHO_MACRO_FRESH", "false")
+#   ★ 기본 ON(데이터 근거 상시 적용). 끄려면 ORTHO_MACRO_FRESH=false. 라우터 코호트 n≥30 검증서
+#   70/30 양구간 개선·롱숏 대칭이 미달이면 false로 롤백(설계상 안전: 1h/4h 결측 시 fresh=0→비차단).
+MACRO_FRESH    = _flag("ORTHO_MACRO_FRESH", "true")
 MACRO_FRESH_LB = _int("ORTHO_MACRO_FRESH_LB", 2)   # fast-EMA 기울기 룩백(상위TF봉). 작을수록 민감
 
 # ── 상속 고정 (업계 표준 · 튜닝 금지 · 예산 비산입) ─────────────────
