@@ -498,6 +498,41 @@ def _decide_direction(polarity, loc, flow, struct, context=None) -> Optional[str
     return None
 
 
+def axis_margins(polarity, direction, loc, flow, struct) -> Optional[dict]:
+    """폴라리티×방향의 3축 '마진' = 임계까지 여유(양수=통과, 음수=미달 크기).
+    넓은 조리개(A+B+C)용: 정확히 1축만 음수(2-of-3 통과)이고 그 축이 경계(|마진|≤δ)면 학습표본.
+      · L/F: 백분위 포인트(연속) → 오프라인 임계 스윕 가능  · S: 정렬 스텝(이산)
+    롱숏 대칭(부호 거울). flow 동조는 캔들프록시 1차 경로 기준(taker OR 보강은 마진서 제외).
+    BREAKOUT은 축구조가 달라 제외(None)."""
+    Lpct, Fpct = loc["L_pct"], flow["F_pct"]
+    f_up = Fpct - (100.0 - oc.P_FLOW)      # ≥0 → FLOW_UP
+    f_dn = oc.P_FLOW - Fpct                # ≥0 → FLOW_DOWN
+    n, up = struct["ema_tf_n"], struct["ema_up_count"]
+    if polarity == "REV":
+        if direction == "long":
+            mL = oc.P_EXT - Lpct                        # L_pct ≤ P_EXT (EXT_LOW)
+            mF = f_up
+            mS = -1 if struct["broken_long"] else 1     # 무효화(신저+전TF하락)면 실패
+        else:
+            mL = Lpct - (100.0 - oc.P_EXT)              # L_pct ≥ 100−P_EXT (EXT_HIGH)
+            mF = f_dn
+            mS = -1 if struct["broken_short"] else 1
+        return {"L": round(mL, 2), "F": round(mF, 2), "S": mS}
+    if polarity == "CONT":
+        lo, mid, hi = oc.cont_pullback_band()
+        if direction == "long":
+            mL = mid - Lpct                              # lo ≤ L < mid (lo=0 비구속)
+            mF = f_up
+            mS = up - max(2, n - 1)                      # aligned_up 임계
+        else:
+            mL = Lpct - mid                              # mid < L ≤ hi
+            mF = f_dn
+            thr_dn = min(1, n - 2) if n >= 3 else 0      # aligned_down 임계
+            mS = thr_dn - up
+        return {"L": round(mL, 2), "F": round(mF, 2), "S": mS}
+    return None
+
+
 def macro_tag(candles_4h) -> str:
     u = _ema_up(candles_4h) if candles_4h and len(candles_4h) >= oc.EMA_SLOW else None
     return "FLAT" if u is None else ("UPLEG" if u else "DOWNLEG")
@@ -506,10 +541,25 @@ def macro_tag(candles_4h) -> str:
 # ════════════════════════════════════════════════════════════════════
 # 5. 진입점: 한 심볼 평가 → 가상 신호 리스트 (0~2건)
 # ════════════════════════════════════════════════════════════════════
+def _scalp_feats(context) -> Dict:
+    """맥락에서 스캘핑 미시구조 피처 추출(없으면 None). 모든 신호에 컬럼으로 실림 — 게이트 아님."""
+    c = context or {}
+    ob = c.get("orderbook") or {}
+    tk = c.get("taker") or {}
+    fr = c.get("funding") or {}
+    return {
+        "obi":         ob.get("obi"),          # 호가 불균형 [-1,+1]
+        "taker_slope": tk.get("slope"),        # CVD 가속(매수비율 기울기)
+        "funding_pct": fr.get("pct"),          # funding 백분위(군중 쏠림)
+        "funding":     fr.get("rate"),         # raw funding rate
+    }
+
+
 def _build_signal(symbol, polarity, direction, entry, b, loc, flow, struct,
-                  mtag, regime, blocked_by=None) -> Dict:
+                  mtag, regime, blocked_by=None, feats=None) -> Dict:
     """라이브·Shadow 공용 신호 dict 빌더. blocked_by 지정 시 Shadow 후보(차단사유 태그).
-    Shadow도 라이브와 *완전히 동일한* entry/TP/SL/사이징 → resolver가 같은 배리어로 채점."""
+    Shadow도 라이브와 *완전히 동일한* entry/TP/SL/사이징 → resolver가 같은 배리어로 채점.
+    feats: 스캘핑 미시구조 피처(OBI·taker기울기·funding백분위) — 모든 신호 컬럼에 동봉."""
     rdist = b["sl_dist"]
     risk_pct = round(rdist / entry * 100.0, 3) if entry else None
     size     = round(oc.RISK_PER_TRADE / rdist, 6) if rdist > 0 else None
@@ -529,6 +579,8 @@ def _build_signal(symbol, polarity, direction, entry, b, loc, flow, struct,
         "regime": regime or "OFF",
         "reason": (f"[SHADOW:{blocked_by}] " + reason) if blocked_by else reason,
     }
+    if feats:
+        sig.update({k: feats.get(k) for k in ("obi", "taker_slope", "funding_pct", "funding")})
     if blocked_by:
         sig["shadow"] = True
         sig["blocked_by"] = blocked_by
@@ -567,6 +619,7 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
 
     spread = None
     out: List[Dict] = []
+    feats = _scalp_feats(context)        # 스캘핑 미시구조 피처(모든 신호 컬럼에 동봉)
 
     def _shadow(reason: str):
         """차단된 셋업을 Shadow 후보로 적재(FN 측정용). 배리어가 유효(RR≥RR_MIN)할 때만 —
@@ -576,7 +629,8 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
         sb = build_barriers(polarity, direction, entry, c15, loc)
         if sb:
             out.append(_build_signal(symbol, polarity, direction, entry, sb,
-                                     loc, flow, struct, mtag, regime, blocked_by=reason))
+                                     loc, flow, struct, mtag, regime,
+                                     blocked_by=reason, feats=feats))
 
     for polarity in polarities:
         if polarity == "BREAKOUT":
@@ -620,6 +674,43 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
             continue
         # C-1 등가-R 사이징은 _build_signal 안에서: SL 거리(=1R)로 수량 역산 → 모든 신호 동일 금액 위험.
         out.append(_build_signal(symbol, polarity, direction, entry, b,
-                                 loc, flow, struct, mtag, regime))
+                                 loc, flow, struct, mtag, regime, feats=feats))
         logger.info(f"[engine] 🟦 {out[-1]['reason']}")
+
+    # 넓은 조리개(A+B+C): '안 만든' near-miss 셋업을 학습/평가용 Shadow로 적재(라이브 불변).
+    _aperture_explore(symbol, polarities, loc, flow, struct, c15, entry, mtag, regime, feats, out)
     return out
+
+
+def _aperture_explore(symbol, polarities, loc, flow, struct, c15, entry, mtag, regime, feats, out):
+    """A+B+C 넓은 조리개 — 정확히 1축만 경계 미달(2-of-3 통과)인 셋업을 연속 축벡터와 적재.
+      A(연속값): axis_vec에 L_pct·F_pct·축별 마진 → 오프라인 임계 스윕
+      B(단일축 절제): EXPLORE:DROP_{L|F|S} 태그 → 어느 축이 과필터인지
+      C(경계 표집): |마진|≤δ(연속축) 또는 ≤1스텝(구조축)만 → 쿼터를 정보밀도 높은 곳에
+    라이브 신호(3-of-3)와 배타 — fails==1만 잡으므로 중복 없음. 롱숏 대칭. BREAKOUT 제외."""
+    if not (oc.SHADOW_ENABLED and oc.APERTURE_EXPLORE):
+        return
+    for polarity in polarities:
+        if polarity == "BREAKOUT":
+            continue
+        for direction in ("long", "short"):
+            m = axis_margins(polarity, direction, loc, flow, struct)
+            if m is None:
+                continue
+            fails = [ax for ax in ("L", "F", "S") if m[ax] < 0]
+            if len(fails) != 1:                       # 정확히 1축 실패(2-of-3)만
+                continue
+            ax = fails[0]
+            if ax in ("L", "F") and abs(m[ax]) > oc.APERTURE_DELTA:   # 경계(C)
+                continue
+            if ax == "S" and abs(m[ax]) > 1:                          # 정렬 1스텝 이내
+                continue
+            sb = build_barriers(polarity, direction, entry, c15, loc)
+            if not sb:                                # 배리어 불가면 '놓친 기회' 아님
+                continue
+            asig = _build_signal(symbol, polarity, direction, entry, sb, loc, flow,
+                                 struct, mtag, regime, blocked_by=f"EXPLORE:DROP_{ax}", feats=feats)
+            asig["axis_vec"] = {"L": loc["L_pct"], "F": flow["F_pct"],
+                                "up": struct["ema_up_count"], "n": struct["ema_tf_n"],
+                                "mL": m["L"], "mF": m["F"], "mS": m["S"]}
+            out.append(asig)

@@ -133,12 +133,28 @@ def main():
     logger.info(f"   기존 OPEN: {len(open_idx['keys'])}건 (중복 진입 차단 기준)")
     sctx = make_shadow_ctx(open_idx, logger)   # FN 측정용 Shadow 컨텍스트(비활성 시 None)
 
+    # 측정용 컬럼(OBI·Taker Slope·Funding %·Axis Vec) 멱등 보장 — 라이브·Shadow DB 둘 다.
+    if oc.SCALP_FEATS and notion.enabled():
+        notion.ensure_schema()                                   # 라이브 DB
+        if sctx is not None:
+            notion.ensure_schema(oc.NOTION_SHADOW_DB_ID)         # Shadow DB
+
     # 1) 수집: 전 심볼 후보를 모은다(라이브=중복-OPEN 선거름 / Shadow=차단 셋업 별도).
     candidates, shadows = [], []
     for sym in symbols:
         lv, sh = collect_candidates(exchange, sym, open_idx, logger)
         candidates += lv
         shadows += sh
+    # 1-B) 유니버스 확장(Tier A): 신규 심볼은 라이브 미승격 — 통과 신호까지 EXPLORE:UNIVERSE로 Shadow만.
+    #   심볼 추가는 독립 표본↑(과적합 불가). single 매트릭스 모드에선 건너뜀(중복 방지). Shadow 활성 시만.
+    if sctx is not None and not single and oc.EXPLORE_SYMBOLS:
+        logger.info(f"   🌑 유니버스 확장 {len(oc.EXPLORE_SYMBOLS)}심볼 → Shadow 적재(라이브 미승격)")
+        for sym in oc.EXPLORE_SYMBOLS:
+            lv, sh = collect_candidates(exchange, sym, open_idx, logger)
+            for sig in lv:                         # 통과 신호도 라이브가 아니라 Shadow로 강등
+                sig["shadow"] = True
+                sig["blocked_by"] = "EXPLORE:UNIVERSE"
+            shadows += lv + sh
     # 2) R6 상관 디둡: 동일 실행 내 후보를 품질(RR) 우선 정렬 → 방향 캡이 최선부터 채워지게.
     #    그리디(심볼 알파벳순)면 평범한 후보가 슬롯을 차지하고 우수 후보가 잘릴 수 있음.
     if oc.CORR_DEDUP:

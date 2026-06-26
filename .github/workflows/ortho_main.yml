@@ -42,6 +42,14 @@ jobs:
           ORTHO_SHADOW_LOG:         ${{ vars.ORTHO_SHADOW_LOG }}
           ORTHO_SHADOW_REASONS:     ${{ vars.ORTHO_SHADOW_REASONS }}
           ORTHO_SHADOW_MAX_PER_RUN: ${{ vars.ORTHO_SHADOW_MAX_PER_RUN }}
+          # ── 넓은 조리개(A+B+C) + 유니버스 확장 + 스캘핑 피처 (Shadow 학습/평가) ──
+          ORTHO_EXPLORE_SYMBOLS:    ${{ vars.ORTHO_EXPLORE_SYMBOLS }}
+          ORTHO_APERTURE_EXPLORE:   ${{ vars.ORTHO_APERTURE_EXPLORE }}
+          ORTHO_APERTURE_DELTA:     ${{ vars.ORTHO_APERTURE_DELTA }}
+          ORTHO_SCALP_FEATS:        ${{ vars.ORTHO_SCALP_FEATS }}
+          ORTHO_OBI_DEPTH:          ${{ vars.ORTHO_OBI_DEPTH }}
+          ORTHO_TAKER_SLOPE_LB:     ${{ vars.ORTHO_TAKER_SLOPE_LB }}
+          ORTHO_FUNDING_HIST:       ${{ vars.ORTHO_FUNDING_HIST }}
           # ── 텔레그램 알림 ON/OFF ──
           # 학습기간(2주)에는 미설정/false → 알림 OFF, 기록·채점만.
           # 학습 완료 후 Variables 에서 ALERT_ENABLED=true 로 변경 → 알림 ON.

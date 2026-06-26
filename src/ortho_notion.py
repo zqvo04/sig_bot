@@ -13,6 +13,7 @@ Shadow DB(FN 측정, 별도 NOTION_SHADOW_DB_ID): 위 스키마 + "Blocked By"(s
   log_signal(sig, database_id=..., status=..., blocked_by=...)로 동일 함수 재사용.
   거부된 셋업을 막힌 순간의 배리어로 적재 → resolver가 같은 채점기로 would-be WIN/LOSS.
 """
+import json
 import logging
 from typing import Optional
 
@@ -26,6 +27,34 @@ import timeutil
 logger = logging.getLogger("ortho.notion")
 _API = "https://api.notion.com/v1"
 _T = 15
+
+# 스캘핑 피처/조리개 컬럼 (측정용). ensure_schema가 두 DB에 멱등 보장 → log_signal이 안전 적재.
+_EXTRA_PROPS = {
+    "OBI":         {"number": {}},        # 호가 불균형 [-1,+1]
+    "Taker Slope": {"number": {}},        # CVD 가속(매수비율 기울기)
+    "Funding %":   {"number": {}},        # funding 백분위
+    "Axis Vec":    {"rich_text": {}},     # 넓은 조리개 연속 축벡터(JSON)
+    "Blocked By":  {"select": {}},        # Shadow 차단/조리개 카테고리(라이브엔 무해)
+}
+_EXTRA_KEYS = ("OBI", "Taker Slope", "Funding %", "Axis Vec")   # 적재 실패 시 제거 대상
+
+
+def ensure_schema(database_id: Optional[str] = None) -> bool:
+    """DB에 측정용 컬럼을 멱등 추가(PATCH /databases). 이미 있으면 무변경. 권한/네트워크 실패는 경고만.
+    봇 토큰은 페이지를 쓰는 통합이라 자기 DB엔 스키마 편집권 보유 → 라이브 DB는 보장 성공이 정상."""
+    db = database_id or oc.NOTION_DATABASE_ID
+    if not (oc.NOTION_TOKEN and db):
+        return False
+    try:
+        r = requests.patch(f"{_API}/databases/{db}", headers=_h(),
+                           json={"properties": _EXTRA_PROPS}, timeout=_T)
+        if r.status_code == 200:
+            logger.info(f"[notion] 스키마 보장 OK {db[:8]}…")
+            return True
+        logger.warning(f"[notion] 스키마 보장 실패 {r.status_code}: {r.text[:160]}")
+    except Exception as e:
+        logger.warning(f"[notion] 스키마 보장 예외: {e}")
+    return False
 
 
 def enabled() -> bool:
@@ -95,9 +124,23 @@ def log_signal(sig: dict, database_id: Optional[str] = None,
                                 f"reachK={oc.TP_REACH_K:g}"),
         }
         if is_shadow:
-            props["Blocked By"] = _sel(blocked_by)   # Shadow DB 전용 컬럼
-        body = {"parent": {"database_id": db}, "properties": props}
-        r = requests.post(f"{_API}/pages", headers=_h(), json=body, timeout=_T)
+            props["Blocked By"] = _sel(blocked_by)   # Shadow/조리개 카테고리 컬럼
+        # 스캘핑 미시구조 피처(모든 신호) + 조리개 연속벡터(EXPLORE 행) — 측정용 컬럼.
+        if oc.SCALP_FEATS:
+            props["OBI"]         = _num(sig.get("obi"))
+            props["Taker Slope"] = _num(sig.get("taker_slope"))
+            props["Funding %"]   = _num(sig.get("funding_pct"))
+        if sig.get("axis_vec"):
+            props["Axis Vec"] = _txt(json.dumps(sig["axis_vec"], separators=(",", ":")))
+        r = requests.post(f"{_API}/pages", headers=_h(),
+                          json={"parent": {"database_id": db}, "properties": props}, timeout=_T)
+        # 라이브 안전판: 스키마 미보장 DB가 신규 컬럼을 거부(400)하면 추가컬럼만 빼고 1회 재시도.
+        if r.status_code != 200 and ("is not a property" in r.text
+                                     or any(k in r.text for k in _EXTRA_KEYS)):
+            for k in _EXTRA_KEYS:
+                props.pop(k, None)
+            r = requests.post(f"{_API}/pages", headers=_h(),
+                              json={"parent": {"database_id": db}, "properties": props}, timeout=_T)
         if r.status_code == 200:
             pid = r.json().get("id")
             tag = f"🌑shadow[{blocked_by}]" if is_shadow else "✅ 기록"
