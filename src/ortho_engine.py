@@ -490,6 +490,35 @@ def macro_tag(candles_4h) -> str:
 # ════════════════════════════════════════════════════════════════════
 # 5. 진입점: 한 심볼 평가 → 가상 신호 리스트 (0~2건)
 # ════════════════════════════════════════════════════════════════════
+def _build_signal(symbol, polarity, direction, entry, b, loc, flow, struct,
+                  mtag, regime, blocked_by=None) -> Dict:
+    """라이브·Shadow 공용 신호 dict 빌더. blocked_by 지정 시 Shadow 후보(차단사유 태그).
+    Shadow도 라이브와 *완전히 동일한* entry/TP/SL/사이징 → resolver가 같은 배리어로 채점."""
+    rdist = b["sl_dist"]
+    risk_pct = round(rdist / entry * 100.0, 3) if entry else None
+    size     = round(oc.RISK_PER_TRADE / rdist, 6) if rdist > 0 else None
+    notional = round(size * entry, 2) if size else None
+    sd = f"up{struct['ema_up_count']}/{struct['ema_tf_n']}"
+    reason = (f"{polarity} {direction.upper()} | L={loc['state']}({loc['L_pct']}) "
+              f"F={flow['state']}({flow['F_pct']}) S={sd} "
+              f"RG={regime or 'OFF'} RR={b['rr']}")
+    sig = {
+        "symbol": symbol, "polarity": polarity, "direction": direction,
+        "entry": _round_price(entry, entry), "tp": b["tp"], "sl": b["sl"],
+        "r_dist": b["sl_dist"], "rr": b["rr"], "bars_limit": b["bars_limit"],
+        "risk_quote": oc.RISK_PER_TRADE, "risk_pct": risk_pct,
+        "size": size, "notional": notional,
+        "l_pct": loc["L_pct"], "f_pct": flow["F_pct"],
+        "s_state": sd, "macro_tag": mtag,
+        "regime": regime or "OFF",
+        "reason": (f"[SHADOW:{blocked_by}] " + reason) if blocked_by else reason,
+    }
+    if blocked_by:
+        sig["shadow"] = True
+        sig["blocked_by"] = blocked_by
+    return sig
+
+
 def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
     import ortho_data as od          # 지연 import (ccxt 의존)
     c15 = od.fetch_candles(exchange, symbol, oc.TF_ENTRY, oc.N_15M_FETCH)
@@ -522,6 +551,17 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
 
     spread = None
     out: List[Dict] = []
+
+    def _shadow(reason: str):
+        """차단된 셋업을 Shadow 후보로 적재(FN 측정용). 배리어가 유효(RR≥RR_MIN)할 때만 —
+        애초에 거래불가(배리어 None)면 '놓친 기회'가 아니므로 기록 제외. 활성·카테고리 게이트."""
+        if not oc.SHADOW_ENABLED or reason.split(":")[0].upper() not in oc.SHADOW_REASONS:
+            return
+        sb = build_barriers(polarity, direction, entry, c15, loc)
+        if sb:
+            out.append(_build_signal(symbol, polarity, direction, entry, sb,
+                                     loc, flow, struct, mtag, regime, blocked_by=reason))
+
     for polarity in polarities:
         if polarity == "BREAKOUT":
             direction = _decide_breakout(c15, loc, flow)
@@ -532,6 +572,7 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
         # R5 추격 방지: CONT(추세동행)는 빠른 EMA 근처(초입)에서만. 연장 추세 진입 차단.
         if polarity == "CONT" and not _within_chase(c15, entry, loc["atr"]):
             logger.info(f"[engine] {symbol} CONT {direction} 추격(>CHASE_K·ATR) 스킵")
+            _shadow("CHASE")
             continue
         # 분류기 지연제거(MACRO_FRESH): 상위TF fast-EMA '기울기'가 거래 방향과 명백히 반대면 차단.
         #   느린 EMA 교차 지연으로 stale-side(상승장 막판 롱·하락전환 저점 롱·상승장 숏)에 진입하는
@@ -540,37 +581,21 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
             fresh = htf_fresh_sign(c1h, c4h, oc.MACRO_FRESH_LB)
             if (direction == "long" and fresh < 0) or (direction == "short" and fresh > 0):
                 logger.info(f"[engine] {symbol} {polarity} {direction} 신선도veto(상위TF추세역전 fresh={fresh})")
+                _shadow("MACRO_FRESH")
                 continue
         if spread is None:
             spread = od.fetch_spread_bps(exchange, symbol)
         veto = context_veto(direction, context, spread)
         if veto:
             logger.info(f"[engine] {symbol} {polarity} {direction} VETO:{veto}")
+            _shadow(veto.split("(")[0].upper())   # crowd/taker/spread → 카테고리 태그
             continue
         b = build_barriers(polarity, direction, entry, c15, loc)
         if b is None:
             logger.info(f"[engine] {symbol} {polarity} {direction} RR<{oc.RR_MIN} 스킵")
             continue
-        # C-1 등가-R 사이징: SL 거리(=1R)로 수량을 역산 → 모든 신호가 동일 금액(RISK_PER_TRADE) 위험.
-        #     변동성 큰 코인=작은 수량, 작은 코인=큰 수량 → PnL%가 아니라 R로 자동 정규화.
-        rdist = b["sl_dist"]
-        risk_pct = round(rdist / entry * 100.0, 3) if entry else None      # 1R 크기(진입가 대비 %)
-        size     = round(oc.RISK_PER_TRADE / rdist, 6) if rdist > 0 else None
-        notional = round(size * entry, 2) if size else None
-        out.append({
-            "symbol": symbol, "polarity": polarity, "direction": direction,
-            "entry": _round_price(entry, entry), "tp": b["tp"], "sl": b["sl"],
-            "r_dist": b["sl_dist"], "rr": b["rr"], "bars_limit": b["bars_limit"],
-            "risk_quote": oc.RISK_PER_TRADE, "risk_pct": risk_pct,
-            "size": size, "notional": notional,
-            "l_pct": loc["L_pct"], "f_pct": flow["F_pct"],
-            "s_state": f"up{struct['ema_up_count']}/{struct['ema_tf_n']}",
-            "macro_tag": mtag,
-            "regime": regime or "OFF",     # R7 레짐 코호트 기록
-            "reason": (f"{polarity} {direction.upper()} | L={loc['state']}({loc['L_pct']}) "
-                       f"F={flow['state']}({flow['F_pct']}) "
-                       f"S=up{struct['ema_up_count']}/{struct['ema_tf_n']} "
-                       f"RG={regime or 'OFF'} RR={b['rr']}"),
-        })
+        # C-1 등가-R 사이징은 _build_signal 안에서: SL 거리(=1R)로 수량 역산 → 모든 신호 동일 금액 위험.
+        out.append(_build_signal(symbol, polarity, direction, entry, b,
+                                 loc, flow, struct, mtag, regime))
         logger.info(f"[engine] 🟦 {out[-1]['reason']}")
     return out

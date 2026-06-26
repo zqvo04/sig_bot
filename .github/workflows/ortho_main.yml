@@ -37,6 +37,11 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          # ── Shadow 로깅(FN 측정) — 별도 DB. 셋 다 있어야 활성(없으면 inert=현행 불변) ──
+          NOTION_SHADOW_DB_ID:      ${{ secrets.NOTION_SHADOW_DB_ID }}
+          ORTHO_SHADOW_LOG:         ${{ vars.ORTHO_SHADOW_LOG }}
+          ORTHO_SHADOW_REASONS:     ${{ vars.ORTHO_SHADOW_REASONS }}
+          ORTHO_SHADOW_MAX_PER_RUN: ${{ vars.ORTHO_SHADOW_MAX_PER_RUN }}
           # ── 텔레그램 알림 ON/OFF ──
           # 학습기간(2주)에는 미설정/false → 알림 OFF, 기록·채점만.
           # 학습 완료 후 Variables 에서 ALERT_ENABLED=true 로 변경 → 알림 ON.

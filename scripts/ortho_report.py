@@ -156,6 +156,7 @@ def load(path):
             r['entry'] = _f(r.get('Entry'))
             r['rdist'] = _f(r.get('R Dist'))
             r['b2e'] = _f(r.get('Bars To Exit'))
+            r['blocked_by'] = (r.get('Blocked By') or '').strip()   # Shadow DB 전용(없으면 '')
             r['t'] = _parse_dt(r.get('Signaled At'))
             # 실현 R = (PnL%/100) * Entry / R거리.  PnL%·Entry·R거리만으로 복원 가능.
             r['R'] = ((r['pnl'] / 100.0) * r['entry'] / r['rdist']
@@ -216,6 +217,50 @@ def walk_forward(res, split=0.7):
         gte = [r for r in te if r['pol'] == p]
         print(f"  {p:10} 학습 avgR={_fmt(avg(gtr))}({len(gtr):2})  "
               f"검증 avgR={_fmt(avg(gte))}({len(gte):2})  {_both_plus(avg(gtr), avg(gte))}")
+
+
+def _fn_verdict(n, rlo, rhi):
+    """Shadow(차단된) 코호트 판정 — 거부권 관점 뒤집힘:
+       막힌 셋업이 *이겼을* 것(R CI 하한>0) → 그 게이트는 승자를 거름 = FN 생성기(롤백검토).
+       막힌 셋업이 *졌을* 것(R CI 상한<0)   → 패자를 정확히 제거 = 정당한 거부권."""
+    if n < MIN_N:
+        return "표본부족(판정보류)"
+    if rlo is not None and rlo > 0:
+        return "✗FN 생성기(승자제거)→롤백검토"
+    if rhi is not None and rhi < 0:
+        return "✓정당(패자제거)"
+    return "~노이즈(중립)"
+
+
+def fn_panel(res):
+    """FN 측정 패널 — Shadow DB 내보내기(Blocked By 보유)에서만 의미.
+    각 차단 카테고리별로 'would-be 성과'를 보고, 그 게이트가 FN을 만드는지 판정한다."""
+    shadow = [r for r in res if r.get('blocked_by')]
+    if not shadow:
+        return
+    print("\n" + "=" * 70)
+    print(f"[FN 측정 — Shadow 코호트] 차단된 셋업의 would-be 성과 ({len(shadow)}건 해소)")
+    print("  해석: 막힌 거래가 이겼을 것(엣지+)이면 그 게이트가 '승자 제거'=FN. 졌을 것이면 정당.")
+    print("-" * 70)
+    d = defaultdict(list)
+    for r in shadow:
+        d[r['blocked_by']].append(r)
+    # 라이브(차단 안 된) 비교 기준선 — 같은 CSV에 섞여 있을 때만
+    live = [r for r in res if not r.get('blocked_by')]
+    if live:
+        lR = [r['R'] for r in live if r['R'] is not None]
+        print(f"  {'(KEPT 라이브)':18} n={len(live):3}  avgR={_fmt(_mean(lR))}  ← 비교 기준선")
+    for k in sorted(d, key=lambda x: str(x)):
+        g = d[k]
+        n = len(g)
+        Rs = [r['R'] for r in g if r['R'] is not None]
+        w = sum(1 for r in g if r['Status'] == 'WIN')
+        rlo, rhi = bootstrap_ci(Rs)
+        flag = '!' if n < MIN_N else ' '
+        ci = f"[{rlo:+.2f},{rhi:+.2f}]" if rlo is not None else "[  --  ]"
+        print(f"  {k:18} n={n:3}{flag} win={w/n*100:4.0f}% avgR={_fmt(_mean(Rs))} "
+              f"CI{ci:>15}  {_fn_verdict(n, rlo, rhi)}")
+    print("  ※ MACRO_FRESH 코호트가 n≥30에서 '엣지+'면 → ORTHO_MACRO_FRESH=false 롤백 근거.")
 
 
 def symmetry_panel(res):
@@ -293,6 +338,7 @@ def main():
     # Stage 0 핵심 — 신뢰성 분해
     walk_forward(res)
     symmetry_panel(res)
+    fn_panel(res)   # Shadow 내보내기(Blocked By)일 때만 출력 — FN 측정 패널
 
     # 코호트 (각 라인에 n게이트·CI·판정 내장)
     cohort(res, lambda r: r['pol'], "Polarity")          # 폴라리티(REV/CONT/BREAKOUT)

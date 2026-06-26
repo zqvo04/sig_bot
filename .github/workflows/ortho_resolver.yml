@@ -35,6 +35,9 @@ jobs:
           OKX_PASSPHRASE:     ${{ secrets.OKX_PASSPHRASE }}
           NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          # Shadow DB도 같은 채점기로 채점(활성 시). 셋 다 있어야 활성.
+          NOTION_SHADOW_DB_ID: ${{ secrets.NOTION_SHADOW_DB_ID }}
+          ORTHO_SHADOW_LOG:    ${{ vars.ORTHO_SHADOW_LOG }}
           LOG_LEVEL:          ${{ vars.LOG_LEVEL }}
           # 채점 정합: 생성기와 동일한 본전스톱·보유한도를 써야 라벨이 일관(불일치 시 WIN/LOSS 왜곡).
           ORTHO_BE_TRIGGER_R: ${{ vars.ORTHO_BE_TRIGGER_R }}
