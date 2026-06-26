@@ -213,7 +213,7 @@ SHADOW_REASONS      = tuple(r.strip().upper() for r in _str(
     "ORTHO_SHADOW_REASONS",
     "MACRO_FRESH,FLOW_FLOOR,CHASE,CROWD,TAKER,SPREAD,SLOT,DIRCAP,EXPLORE").split(",") if r.strip())
 # EXPLORE = 넓은 조리개(A+B+C)·유니버스 확장 적재 카테고리. 빼면 그 campaign만 정지.
-SHADOW_MAX_PER_RUN  = _int("ORTHO_SHADOW_MAX_PER_RUN", 60)   # Notion write 쿼터(런당) — API 보호. 확장으로 상향
+SHADOW_MAX_PER_RUN  = _int("ORTHO_SHADOW_MAX_PER_RUN", 0)    # 런당 write 상한(0=무제한, 기본). 코인별 OPEN 중복차단이 자연 상한 → 런당 진입 제한 없음. >0 설정 시에만 API 보호용 상한
 # 활성 조건: 플래그 ON ∧ 토큰 ∧ 별도 DB id. 하나라도 없으면 비활성(코드 기본 OFF).
 SHADOW_ENABLED      = bool(SHADOW_LOG and NOTION_TOKEN and NOTION_SHADOW_DB_ID)
 
@@ -271,6 +271,6 @@ def summary() -> str:
             f"| risk={RISK_PER_TRADE:g}U BE@{BE_TRIGGER_R}R/+{BE_LOCK_R}R "
             f"maxDir={MAX_CONCURRENT_DIR} RR_MAX={RR_MAX} "
             f"| notion={'ON' if NOTION_ENABLED else 'OFF'} "
-            f"shadow={'ON(q'+str(SHADOW_MAX_PER_RUN)+')' if SHADOW_ENABLED else 'OFF'} "
+            f"shadow={'ON(q'+(str(SHADOW_MAX_PER_RUN) if SHADOW_MAX_PER_RUN>0 else '∞')+')' if SHADOW_ENABLED else 'OFF'} "
             f"aperture={'ON(δ'+format(APERTURE_DELTA,'g')+')' if APERTURE_EXPLORE else 'OFF'} "
             f"explore={len(EXPLORE_SYMBOLS)}sym scalp={'ON' if SCALP_FEATS else 'OFF'}")

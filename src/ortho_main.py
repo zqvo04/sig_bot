@@ -61,16 +61,20 @@ def collect_candidates(exchange, symbol: str, open_idx: dict, logger):
 
 
 def make_shadow_ctx(open_idx: dict, logger):
-    """Shadow 적재 컨텍스트: Shadow DB의 기존 OPEN 색인 + 런당 쿼터. 비활성 시 None."""
+    """Shadow 적재 컨텍스트: Shadow DB의 기존 OPEN 색인 + (선택)런당 상한. 비활성 시 None.
+    quota=None → 런당 진입 제한 없음(기본). 코인별 OPEN 중복차단(keys/live_keys)이 자연 상한."""
     if not oc.SHADOW_ENABLED:
         return None
     sidx = notion.open_index(database_id=oc.NOTION_SHADOW_DB_ID)
-    logger.info(f"   🌑 Shadow 로깅 ON — 기존 OPEN shadow {len(sidx['keys'])}건 · 쿼터 {oc.SHADOW_MAX_PER_RUN}")
-    return {"keys": sidx["keys"], "live_keys": open_idx["keys"], "quota": oc.SHADOW_MAX_PER_RUN}
+    quota = oc.SHADOW_MAX_PER_RUN if oc.SHADOW_MAX_PER_RUN > 0 else None
+    cap = "무제한" if quota is None else f"상한 {quota}"
+    logger.info(f"   🌑 Shadow 로깅 ON — 기존 OPEN shadow {len(sidx['keys'])}건 · {cap}")
+    return {"keys": sidx["keys"], "live_keys": open_idx["keys"], "quota": quota}
 
 
 def shadow_emit(sig: dict, reason: str, sctx, logger) -> bool:
-    """차단된 셋업을 Shadow DB에 적재(FN 측정). 카테고리 게이트·중복·쿼터를 모두 통과해야 기록."""
+    """차단된 셋업을 Shadow DB에 적재(FN 측정). 카테고리 게이트 + 코인별 OPEN 중복차단만 통과하면 기록.
+    런당 진입 제한 없음(quota=None 기본). ORTHO_SHADOW_MAX_PER_RUN>0 설정 시에만 그 상한을 추가 적용."""
     if sctx is None or not oc.SHADOW_ENABLED:
         return False
     cat = (reason or "").split(":")[0].upper()
@@ -78,17 +82,18 @@ def shadow_emit(sig: dict, reason: str, sctx, logger) -> bool:
         return False
     sym = sig["symbol"]; dr = (sig.get("direction") or "").lower(); pol = sig["polarity"]
     key = (sym, pol, dr)
-    if key in sctx["keys"]:                # 이미 OPEN shadow → 중복 적재 방지
+    if key in sctx["keys"]:                # 이미 OPEN shadow(코인·polarity·방향) → 중복 적재 방지
         return False
     if key in sctx["live_keys"]:           # 같은 셋업이 라이브로 살아있음 → '놓침' 아님, 제외
         return False
-    if sctx["quota"] <= 0:
-        logger.info("   🌑 Shadow 쿼터 소진 — skip")
+    if sctx["quota"] is not None and sctx["quota"] <= 0:   # 선택적 상한(기본 무제한)
+        logger.info("   🌑 Shadow 상한 소진 — skip")
         return False
     pid = notion.log_signal(sig, database_id=oc.NOTION_SHADOW_DB_ID, status="OPEN", blocked_by=reason)
     if pid:
         sctx["keys"].add(key)
-        sctx["quota"] -= 1
+        if sctx["quota"] is not None:
+            sctx["quota"] -= 1
         return True
     return False
 
@@ -161,7 +166,7 @@ def main():
         candidates.sort(key=lambda s: s.get("rr") or 0.0, reverse=True)
     # 3) 승인: 슬롯·방향 캡 적용하며 기록·알림(캡 차단분은 admit 내부에서 Shadow 적재).
     total = sum(1 for sig in candidates if admit(sig, open_idx, sctx, logger))
-    # 4) 엔진 차단점(거부권/추격)에서 모인 Shadow 후보 적재 — RR 우선(쿼터 효율).
+    # 4) 엔진 차단점(거부권/추격)에서 모인 Shadow 후보 적재 — RR 우선(상한 설정 시 우선순위 확보).
     shadow_n = 0
     if sctx is not None and shadows:
         shadows.sort(key=lambda s: s.get("rr") or 0.0, reverse=True)
