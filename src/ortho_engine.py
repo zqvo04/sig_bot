@@ -366,6 +366,22 @@ def htf_fresh_sign(candles_1h, candles_4h, lb) -> int:
 # ════════════════════════════════════════════════════════════════════
 # 2. 맥락 거부권 (차단 전용)
 # ════════════════════════════════════════════════════════════════════
+def flow_exhaust_veto(direction, f_pct) -> Optional[str]:
+    """흐름-끝물 진입 차단(차단 전용 거부권). 진입 방향으로 F_pct(흐름 백분위)가 극단까지
+    소진된 자리 = 끝물 추격 → 차단. 데이터: SHORT&F<15 누적 −22.76R(taker fix 후에도 잔존).
+      SHORT: F_pct < FLOW_FLOOR_PCT(매도 소진 바닥)  /  LONG: F_pct > 100−FLOW_CEIL_PCT(매수 소진 천장)
+    각 임계 0=비활성. 실측 비대칭 반영 — SHORT 바닥만 기본 ON, LONG 천장은 OFF(Shadow 측정 후 승격).
+    부호 없는 자기정규화 백분위(절대값 아님) → 곡선맞춤 표면 아님. 신규 fetch 0(이미 받은 flow 재사용)."""
+    if f_pct is None:
+        return None
+    d = direction.lower()
+    if d == "short" and oc.FLOW_FLOOR_PCT > 0 and f_pct < oc.FLOW_FLOOR_PCT:
+        return f"FLOW_FLOOR({f_pct:.0f})"
+    if d == "long" and oc.FLOW_CEIL_PCT > 0 and f_pct > 100.0 - oc.FLOW_CEIL_PCT:
+        return f"FLOW_FLOOR({f_pct:.0f})"
+    return None
+
+
 def context_veto(direction, context, spread_bps) -> Optional[str]:
     d = direction.lower()
     ls = (context or {}).get("ls_ratio") or {}
@@ -583,6 +599,14 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
                 logger.info(f"[engine] {symbol} {polarity} {direction} 신선도veto(상위TF추세역전 fresh={fresh})")
                 _shadow("MACRO_FRESH")
                 continue
+        # 흐름-끝물 진입 차단(FLOW_FLOOR): F_pct가 진입 방향으로 소진된 끝물 추격이면 차단.
+        #   데이터 검증: SHORT&F<15 −22.76R(taker fix 후에도 −8.44R 잔존). 막힌 셋업은 Shadow로 채점(자기검증).
+        #   spread fetch 이전에 둬 끝물 차단 시 불필요한 호가 조회를 절약. 롱숏 미러는 임계로 제어(기본 SHORT만).
+        ffv = flow_exhaust_veto(direction, flow["F_pct"])
+        if ffv:
+            logger.info(f"[engine] {symbol} {polarity} {direction} VETO:{ffv}")
+            _shadow("FLOW_FLOOR")
+            continue
         if spread is None:
             spread = od.fetch_spread_bps(exchange, symbol)
         veto = context_veto(direction, context, spread)

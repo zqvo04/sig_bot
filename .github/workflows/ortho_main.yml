@@ -88,4 +88,7 @@ jobs:
           # 분류기 지연제거(MACRO_FRESH) — 상위TF fast-EMA 기울기 거부권. ★ 기본 ON(미설정 시 코드 기본 true)
           ORTHO_MACRO_FRESH:      ${{ vars.ORTHO_MACRO_FRESH }}
           ORTHO_MACRO_FRESH_LB:   ${{ vars.ORTHO_MACRO_FRESH_LB }}
+          # 흐름-끝물 진입 차단(FLOW_FLOOR) — SHORT&F<15 누수 차단. ★ SHORT측 기본 ON(미설정 시 15). 0=OFF, LONG미러=CEIL>0
+          ORTHO_FLOW_FLOOR_PCT:   ${{ vars.ORTHO_FLOW_FLOOR_PCT }}
+          ORTHO_FLOW_CEIL_PCT:    ${{ vars.ORTHO_FLOW_CEIL_PCT }}
         run: python src/ortho_main.py
