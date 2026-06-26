@@ -8,6 +8,10 @@ DB 스키마(ORTHO 양식):
   Signal(title) Status Engine Polarity Symbol Direction
   Entry TP SL "R Dist" "Bars Limit" RR L_pct F_pct S_state MacroTag Reason
   "MFE R" "MAE R" "Bars To Exit" "Signaled At" "Resolved At" Note
+
+Shadow DB(FN 측정, 별도 NOTION_SHADOW_DB_ID): 위 스키마 + "Blocked By"(select) 1컬럼.
+  log_signal(sig, database_id=..., status=..., blocked_by=...)로 동일 함수 재사용.
+  거부된 셋업을 막힌 순간의 배리어로 적재 → resolver가 같은 채점기로 would-be WIN/LOSS.
 """
 import logging
 from typing import Optional
@@ -51,17 +55,23 @@ def _p_date(p):
 
 
 # ── INSERT ────────────────────────────────────────────────────────
-def log_signal(sig: dict) -> Optional[str]:
-    if not enabled():
+def log_signal(sig: dict, database_id: Optional[str] = None,
+               status: str = "OPEN", blocked_by: Optional[str] = None) -> Optional[str]:
+    """신호 1건을 Notion에 적재. database_id 미지정=라이브 DB(현행).
+    blocked_by 지정 시 Shadow 기록(별도 DB) — Engine=ORTHO-SHADOW, "Blocked By" 컬럼 채움."""
+    db = database_id or oc.NOTION_DATABASE_ID
+    if not (oc.NOTION_TOKEN and db):
         return None
     try:
         d = (sig.get("direction") or "").upper()
+        is_shadow = bool(blocked_by)
+        title = (f"{'🌑 ' if is_shadow else ''}{sig['symbol']} {d} · {sig['polarity']} · "
+                 f"RG{sig.get('regime','OFF')} · RR{sig.get('rr','?')} · {sig.get('macro_tag','?')}"
+                 f"{(' · BLK:'+blocked_by) if is_shadow else ''}")
         props = {
-            "Signal":      _title(f"{sig['symbol']} {d} · {sig['polarity']} · "
-                                  f"RG{sig.get('regime','OFF')} · "
-                                  f"RR{sig.get('rr','?')} · {sig.get('macro_tag','?')}"),
-            "Status":      _sel("OPEN"),
-            "Engine":      _sel(f"ORTHO-{sig['polarity']}"),
+            "Signal":      _title(title),
+            "Status":      _sel(status),
+            "Engine":      _sel("ORTHO-SHADOW" if is_shadow else f"ORTHO-{sig['polarity']}"),
             "Polarity":    _sel(sig["polarity"]),
             "Symbol":      _sel(sig["symbol"]),
             "Direction":   _sel(d),
@@ -84,11 +94,14 @@ def log_signal(sig: dict) -> Optional[str]:
                                 f"| BE@{oc.BE_TRIGGER_R}R+{oc.BE_LOCK_R}R capRR{oc.RR_MAX} "
                                 f"reachK={oc.TP_REACH_K:g}"),
         }
-        body = {"parent": {"database_id": oc.NOTION_DATABASE_ID}, "properties": props}
+        if is_shadow:
+            props["Blocked By"] = _sel(blocked_by)   # Shadow DB 전용 컬럼
+        body = {"parent": {"database_id": db}, "properties": props}
         r = requests.post(f"{_API}/pages", headers=_h(), json=body, timeout=_T)
         if r.status_code == 200:
             pid = r.json().get("id")
-            logger.info(f"[notion] ✅ 기록 {sig['symbol']} {sig['polarity']} {d} → {pid}")
+            tag = f"🌑shadow[{blocked_by}]" if is_shadow else "✅ 기록"
+            logger.info(f"[notion] {tag} {sig['symbol']} {sig['polarity']} {d} → {pid}")
             return pid
         logger.error(f"[notion] ❌ 기록 실패 {r.status_code}: {r.text[:200]}")
     except Exception as e:
@@ -109,14 +122,17 @@ def _parse(page):
             "sl": _p_num(p.get("SL")), "r_dist": _p_num(p.get("R Dist")),
             "bars_limit": _p_num(p.get("Bars Limit")),
             "signaled_at": _p_date(p.get("Signaled At")),
+            "blocked_by": _p_sel(p.get("Blocked By")),   # Shadow 행에만 존재(라이브=None)
         }
     except Exception as e:
         logger.warning(f"[notion] 파싱 실패: {e}")
         return None
 
 
-def query_open(limit=None):
-    if not enabled():
+def query_open(limit=None, database_id: Optional[str] = None):
+    """Status=OPEN 신호 조회. database_id 미지정=라이브 DB. Shadow DB도 같은 함수로 조회."""
+    db = database_id or oc.NOTION_DATABASE_ID
+    if not (oc.NOTION_TOKEN and db):
         return []
     cap = limit or oc.RESOLVER_MAX_OPEN_PER_RUN
     out, cursor = [], None
@@ -127,7 +143,7 @@ def query_open(limit=None):
                     "page_size": 100}
             if cursor:
                 body["start_cursor"] = cursor
-            r = requests.post(f"{_API}/databases/{oc.NOTION_DATABASE_ID}/query",
+            r = requests.post(f"{_API}/databases/{db}/query",
                               headers=_h(), json=body, timeout=_T)
             if r.status_code != 200:
                 logger.error(f"[notion] ❌ OPEN 조회 실패 {r.status_code}: {r.text[:200]}")
@@ -148,18 +164,20 @@ def query_open(limit=None):
 
 
 # ── 중복 진입 차단 인덱스 (신호 생성기) ──────────────────────────
-def open_index() -> dict:
+def open_index(database_id: Optional[str] = None) -> dict:
     """현재 OPEN 신호를 색인해 중복/과밀 진입을 차단한다 (1회 쿼리).
       keys      : {(symbol, polarity, direction)} — 동일 셋업 OPEN 여부
       dir_count : {(symbol, direction): 건수}      — 심볼·방향별 슬롯(MAX_POS_DIR)
       glob_dir  : {direction: 건수}               — 전역 방향 노출(MAX_CONCURRENT_DIR, A-3)
     동일 셋업이 이미 OPEN이면 해소(WIN/LOSS/TIMEOUT) 전까지 재진입 금지 →
     같은 시장상황에서 15분마다 같은 신호가 중복 적재되는 것을 막는다.
+    database_id 지정 시 그 DB(예: Shadow DB) 기준 색인 — Shadow 중복 적재 방지에 재사용.
     """
+    db = database_id or oc.NOTION_DATABASE_ID
     idx = {"keys": set(), "dir_count": {}, "glob_dir": {}}
-    if not enabled():
+    if not (oc.NOTION_TOKEN and db):
         return idx
-    for r in query_open():
+    for r in query_open(database_id=db):
         sym = r.get("symbol")
         dr  = (r.get("direction") or "").lower()
         pol = r.get("polarity") or ""

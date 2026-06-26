@@ -129,6 +129,12 @@ def main():
 
     open_sigs = notion.query_open()
     logger.info(f"   OPEN: {len(open_sigs)}건")
+    # FN 측정: Shadow DB의 OPEN도 *같은* triple-barrier로 채점(별도 DB → 라이브 통계 불변).
+    #   page_id로 PATCH하므로 어느 DB 소속이든 update_outcome이 그대로 동작.
+    if oc.SHADOW_ENABLED:
+        shadow_open = notion.query_open(database_id=oc.NOTION_SHADOW_DB_ID)
+        logger.info(f"   🌑 Shadow OPEN: {len(shadow_open)}건")
+        open_sigs += shadow_open
     if not open_sigs:
         return
 
