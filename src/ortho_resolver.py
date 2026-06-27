@@ -70,7 +70,10 @@ def evaluate_outcome(exchange, sig: dict) -> dict:
     armed    = False
     for c in candles:
         ts, high, low, close = c[0], c[2], c[3], c[4]
-        if ts <= since_ms:
+        # 진입시각(Signaled At)보다 '이전'에 연 봉만 제외. 닫힌봉 앵커링 시 since는 봉 경계와
+        #   정확히 일치(ts==since=진입봉 시가) → 진입봉 첫 서브캔들 포함. 레거시(장중 since)에선
+        #   진입 포함봉은 open<since라 그대로 제외(동작 불변). '<='→'<'는 진입봉 누락만 교정.
+        if ts < since_ms:
             continue
         used += 1
         if is_long:

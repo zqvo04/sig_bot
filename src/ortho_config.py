@@ -230,6 +230,10 @@ N_15M_FETCH  = 200
 #   72로 늘리면 분포가 매끄러워져 노이즈성 누락↓. 자기정규화 유지(절대값 아님) → 단일변수 A/B.
 N_5M_FETCH   = _int("ORTHO_N_5M_FETCH", 48)
 N_HTF_FETCH  = 60      # 1h/4h 구조축용
+# 닫힌 캔들만 사용(기록 무결성): OKX fetch_ohlcv는 형성 중(미완성) 캔들을 마지막 원소로 반환한다.
+#   ON(기본)이면 미완성 봉을 드롭 → entry·전축·Signaled At이 '마지막 닫힌 봉'에 앵커링되어
+#   차트와 정확히 일치하고 재현 가능. OFF면 레거시(미완성 봉 종가=일시적 스냅샷). 단일변수 롤백.
+CLOSED_CANDLES = _flag("ORTHO_CLOSED_CANDLES", "true")
 
 # ── 폴라리티: 어떤 셋업을 기록할지 ───────────────────────────────
 #   학습기간엔 둘 다 기록해 A/B 비교 → 우위 폴라리티만 남기는 식으로 발전
@@ -265,6 +269,7 @@ def summary() -> str:
             f"reachK={TP_REACH_K:g} chaseK={CHASE_K:g} dedup={'ON' if CORR_DEDUP else 'OFF'} "
             f"brkRange={'ON' if BREAKOUT_RANGE else 'OFF'} "
             f"takerF={'ON' if FLOW_TAKER_CONFIRM else 'OFF'} n5m={N_5M_FETCH} "
+            f"closedC={'ON' if CLOSED_CANDLES else 'OFF'} "
             f"fresh={'ON(lb'+str(MACRO_FRESH_LB)+')' if MACRO_FRESH else 'OFF'} "
             f"floor={'S<'+format(FLOW_FLOOR_PCT,'g') if FLOW_FLOOR_PCT>0 else 'OFF'}"
             f"{('/L>'+format(100-FLOW_CEIL_PCT,'g')) if FLOW_CEIL_PCT>0 else ''} "

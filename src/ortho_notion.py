@@ -115,7 +115,7 @@ def log_signal(sig: dict, database_id: Optional[str] = None,
             "S_state":     _txt(sig.get("s_state")),
             "MacroTag":    _sel(sig.get("macro_tag")),
             "Reason":      _txt(sig.get("reason")),
-            "Signaled At": _date(timeutil.now_kst_iso()),
+            "Signaled At": _date(sig.get("signaled_at") or timeutil.now_kst_iso()),
             # C-1 등가-R 사이징 기록(기존 Note 칼럼 재사용 — 스키마 변경 불필요).
             "Note":        _txt(f"RG={sig.get('regime','OFF')} "
                                 f"size={sig.get('size')} ({sig.get('notional')}U) "

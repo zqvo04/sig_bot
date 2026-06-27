@@ -19,11 +19,13 @@ ortho_engine.py — ORTHO-3 직교 3축 합의 엔진 (자립형) [TARGET: 15분
 """
 import logging
 import math
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
 
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 import ortho_config as oc
+import timeutil
 # ortho_data(ccxt 의존)는 실제 fetch가 필요한 evaluate()에서 지연 import —
 # 순수 축 로직(axis_*/veto/barriers)은 ccxt 없이도 import·단위테스트 가능.
 
@@ -556,7 +558,7 @@ def _scalp_feats(context) -> Dict:
 
 
 def _build_signal(symbol, polarity, direction, entry, b, loc, flow, struct,
-                  mtag, regime, blocked_by=None, feats=None) -> Dict:
+                  mtag, regime, blocked_by=None, feats=None, signaled_at=None) -> Dict:
     """라이브·Shadow 공용 신호 dict 빌더. blocked_by 지정 시 Shadow 후보(차단사유 태그).
     Shadow도 라이브와 *완전히 동일한* entry/TP/SL/사이징 → resolver가 같은 배리어로 채점.
     feats: 스캘핑 미시구조 피처(OBI·taker기울기·funding백분위) — 모든 신호 컬럼에 동봉."""
@@ -581,23 +583,43 @@ def _build_signal(symbol, polarity, direction, entry, b, loc, flow, struct,
     }
     if feats:
         sig.update({k: feats.get(k) for k in ("obi", "taker_slope", "funding_pct", "funding")})
+    if signaled_at:
+        sig["signaled_at"] = signaled_at     # 마지막 닫힌 봉 종료시각(없으면 notion이 now 폴백)
     if blocked_by:
         sig["shadow"] = True
         sig["blocked_by"] = blocked_by
     return sig
 
 
+def _drop_forming(exchange, candles, tf, now_ms):
+    """OKX fetch_ohlcv는 형성 중(미완성) 봉을 마지막 원소로 준다(confirm=0). CLOSED_CANDLES ON이면
+    마지막 봉이 아직 안 닫혔을 때(open+주기>now)만 드롭 → 모든 축·entry가 '닫힌 봉'에서만 산출.
+    봉 경계에 정확히 호출돼 마지막이 이미 닫혔으면 보존(시간검사로 과드롭 방지)."""
+    if not (oc.CLOSED_CANDLES and candles):
+        return candles
+    tf_ms = exchange.parse_timeframe(tf) * 1000
+    return candles[:-1] if (candles[-1][0] + tf_ms) > now_ms else candles
+
+
 def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
     import ortho_data as od          # 지연 import (ccxt 의존)
-    c15 = od.fetch_candles(exchange, symbol, oc.TF_ENTRY, oc.N_15M_FETCH)
-    c5  = od.fetch_candles(exchange, symbol, oc.TF_FLOW,  oc.N_5M_FETCH)
+    now_ms = exchange.milliseconds()
+    c15 = _drop_forming(exchange, od.fetch_candles(exchange, symbol, oc.TF_ENTRY, oc.N_15M_FETCH), oc.TF_ENTRY, now_ms)
+    c5  = _drop_forming(exchange, od.fetch_candles(exchange, symbol, oc.TF_FLOW,  oc.N_5M_FETCH),  oc.TF_FLOW,  now_ms)
     if len(c15) < oc.N_MEAN + oc.W_L or len(c5) < oc.W_F + 6:
         logger.info(f"[engine] {symbol} 캔들 부족 — 스킵")
         return []
-    c1h = od.fetch_candles(exchange, symbol, oc.TF_MID,   oc.N_HTF_FETCH)
-    c4h = od.fetch_candles(exchange, symbol, oc.TF_MACRO, oc.N_HTF_FETCH)
+    c1h = _drop_forming(exchange, od.fetch_candles(exchange, symbol, oc.TF_MID,   oc.N_HTF_FETCH), oc.TF_MID,   now_ms)
+    c4h = _drop_forming(exchange, od.fetch_candles(exchange, symbol, oc.TF_MACRO, oc.N_HTF_FETCH), oc.TF_MACRO, now_ms)
 
     entry = float(c15[-1][4])
+    # 기록 무결성: entry는 '마지막 닫힌 15m봉 종가'(차트와 일치). Signaled At도 그 봉의 종료시각
+    #   (=다음 봉 시가시각)으로 앵커 → resolver가 정확히 그 시점부터 채점(벽시계 지연 무관). 롱숏 공통.
+    if oc.CLOSED_CANDLES:
+        entry_close_ms = c15[-1][0] + exchange.parse_timeframe(oc.TF_ENTRY) * 1000
+        signaled_at = timeutil.kst_iso(datetime.fromtimestamp(entry_close_ms / 1000, tz=timezone.utc))
+    else:
+        signaled_at = None          # 레거시: notion이 now_kst_iso()로 폴백
     loc, flow = axis_location(c15), axis_flow(c5)
     if loc is None or flow is None:
         return []
@@ -630,7 +652,7 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
         if sb:
             out.append(_build_signal(symbol, polarity, direction, entry, sb,
                                      loc, flow, struct, mtag, regime,
-                                     blocked_by=reason, feats=feats))
+                                     blocked_by=reason, feats=feats, signaled_at=signaled_at))
 
     for polarity in polarities:
         if polarity == "BREAKOUT":
@@ -674,15 +696,15 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
             continue
         # C-1 등가-R 사이징은 _build_signal 안에서: SL 거리(=1R)로 수량 역산 → 모든 신호 동일 금액 위험.
         out.append(_build_signal(symbol, polarity, direction, entry, b,
-                                 loc, flow, struct, mtag, regime, feats=feats))
+                                 loc, flow, struct, mtag, regime, feats=feats, signaled_at=signaled_at))
         logger.info(f"[engine] 🟦 {out[-1]['reason']}")
 
     # 넓은 조리개(A+B+C): '안 만든' near-miss 셋업을 학습/평가용 Shadow로 적재(라이브 불변).
-    _aperture_explore(symbol, polarities, loc, flow, struct, c15, entry, mtag, regime, feats, out)
+    _aperture_explore(symbol, polarities, loc, flow, struct, c15, entry, mtag, regime, feats, signaled_at, out)
     return out
 
 
-def _aperture_explore(symbol, polarities, loc, flow, struct, c15, entry, mtag, regime, feats, out):
+def _aperture_explore(symbol, polarities, loc, flow, struct, c15, entry, mtag, regime, feats, signaled_at, out):
     """A+B+C 넓은 조리개 — 정확히 1축만 경계 미달(2-of-3 통과)인 셋업을 연속 축벡터와 적재.
       A(연속값): axis_vec에 L_pct·F_pct·축별 마진 → 오프라인 임계 스윕
       B(단일축 절제): EXPLORE:DROP_{L|F|S} 태그 → 어느 축이 과필터인지
@@ -709,7 +731,8 @@ def _aperture_explore(symbol, polarities, loc, flow, struct, c15, entry, mtag, r
             if not sb:                                # 배리어 불가면 '놓친 기회' 아님
                 continue
             asig = _build_signal(symbol, polarity, direction, entry, sb, loc, flow,
-                                 struct, mtag, regime, blocked_by=f"EXPLORE:DROP_{ax}", feats=feats)
+                                 struct, mtag, regime, blocked_by=f"EXPLORE:DROP_{ax}",
+                                 feats=feats, signaled_at=signaled_at)
             asig["axis_vec"] = {"L": loc["L_pct"], "F": flow["F_pct"],
                                 "up": struct["ema_up_count"], "n": struct["ema_tf_n"],
                                 "mL": m["L"], "mF": m["F"], "mS": m["S"]}

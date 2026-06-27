@@ -99,4 +99,6 @@ jobs:
           # 흐름-끝물 진입 차단(FLOW_FLOOR) — SHORT&F<15 누수 차단. ★ SHORT측 기본 ON(미설정 시 15). 0=OFF, LONG미러=CEIL>0
           ORTHO_FLOW_FLOOR_PCT:   ${{ vars.ORTHO_FLOW_FLOOR_PCT }}
           ORTHO_FLOW_CEIL_PCT:    ${{ vars.ORTHO_FLOW_CEIL_PCT }}
+          # 닫힌 캔들만 사용(기록 무결성) — 형성 중 봉 드롭→entry·축·Signaled At이 마지막 닫힌 봉에 앵커링. ★ 기본 ON. false=레거시
+          ORTHO_CLOSED_CANDLES:   ${{ vars.ORTHO_CLOSED_CANDLES }}
         run: python src/ortho_main.py
