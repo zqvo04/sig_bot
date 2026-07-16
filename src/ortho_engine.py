@@ -569,6 +569,7 @@ def _scalp_feats(context) -> Dict:
     return {
         "obi":         ob.get("obi"),          # 호가 불균형 [-1,+1]
         "taker_slope": tk.get("slope"),        # CVD 가속(매수비율 기울기)
+        "taker_net":   tk.get("net"),          # Stage 2.2 순-테이커압력 평균 [-1,+1] (CVD 원재료)
         "funding_pct": fr.get("pct"),          # funding 백분위(군중 쏠림)
         "funding":     fr.get("rate"),         # raw funding rate
     }
@@ -599,7 +600,7 @@ def _build_signal(symbol, polarity, direction, entry, b, loc, flow, struct,
         "reason": (f"[SHADOW:{blocked_by}] " + reason) if blocked_by else reason,
     }
     if feats:
-        sig.update({k: feats.get(k) for k in ("obi", "taker_slope", "funding_pct", "funding")})
+        sig.update({k: feats.get(k) for k in ("obi", "taker_slope", "taker_net", "funding_pct", "funding")})
     if signaled_at:
         sig["signaled_at"] = signaled_at     # 마지막 닫힌 봉 종료시각(없으면 notion이 now 폴백)
     if blocked_by:

@@ -191,6 +191,9 @@ SCALP_FEATS    = _flag("ORTHO_SCALP_FEATS", "true")          # 피처 수집·�
 OBI_DEPTH      = _int("ORTHO_OBI_DEPTH", 10)                 # OBI 호가 깊이 레벨(상위 N단)
 TAKER_SLOPE_LB = _int("ORTHO_TAKER_SLOPE_LB", 8)            # taker 매수비율 기울기 룩백(5m봉)
 FUNDING_HIST   = _int("ORTHO_FUNDING_HIST", 60)            # funding 백분위 표본 길이(과거 펀딩 횟수)
+# Stage 2.2 CVD 원재료: 순-테이커압력 평균 룩백(5m봉). OKX taker 엔드포인트 상한 100 이내.
+#   48=N_5M_FETCH 정합·문서고정(성과로 고르는 argmax 금지 §1). SCALP_FEATS OFF면 미사용(fetch 불확장).
+TAKER_CVD_LB   = _int("ORTHO_TAKER_CVD_LB", 48)
 # ── F1 레짐 나이(측정 전용, 게이트 아님 — Phase 1) ─────────────────────────
 #   진단: UPLEG(4h EMA)이 롱숏 양방향 손실 군집(Base −27.9R·Shadow −43R, 두 독립표본 재현).
 #   가설: 손실이 '레짐 전환 직후' stale-side 진입에 몰릴 것 → 레짐 나이(전환 후 4h봉 수)를

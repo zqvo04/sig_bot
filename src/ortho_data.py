@@ -100,10 +100,12 @@ def _lin_slope(ys) -> float:
 
 
 def fetch_taker(symbol: str) -> dict:
-    neutral = {"available": False, "buy_ratio": 0.5, "sell_ratio": 0.5, "slope": None}
+    neutral = {"available": False, "buy_ratio": 0.5, "sell_ratio": 0.5, "slope": None, "net": None}
     try:
-        # 기울기 표본 확보: 룩백과 기울기창 중 큰 값으로 받되 과도하지 않게.
-        limit = max(oc.TAKER_LOOKBACK, oc.TAKER_SLOPE_LB)
+        # 기울기 표본 확보: 룩백·기울기창·CVD창 중 큰 값으로 받되 과도하지 않게(OKX 상한 100).
+        #   슬라이스(VETO=rows[:LOOKBACK], slope=rows[:SLOPE_LB])는 불변 → 기존 거부권 동작 보존.
+        limit = min(100, max(oc.TAKER_LOOKBACK, oc.TAKER_SLOPE_LB,
+                             oc.TAKER_CVD_LB if oc.SCALP_FEATS else 0))
         resp = requests.get(f"{oc.OKX_BASE}/rubik/stat/taker-volume-contract",
                             params={"instId": to_swap_id(symbol),
                                     "period": oc.TAKER_PERIOD,
@@ -129,8 +131,16 @@ def fetch_taker(symbol: str) -> dict:
             if t > 0:
                 series.append(b / t)
         slope = round(_lin_slope(series[::-1]), 6) if len(series) >= 2 else None
+        # Stage 2.2 CVD 원재료: 최근 CVD_LB봉의 봉별 순-테이커압력 (buy−sell)/(buy+sell) 평균.
+        #   ∈[−1,+1] 스케일프리. 순서 무관(평균). CVD 다이버전스는 리포트서 vwap_dev와 오프라인 유도.
+        nets = []
+        for r in rows[:oc.TAKER_CVD_LB]:
+            s, b = float(r[1]), float(r[2]); t = s + b
+            if t > 0:
+                nets.append((b - s) / t)
+        net = round(sum(nets) / len(nets), 4) if nets else None
         return {"available": True, "buy_ratio": round(buy / tot, 4),
-                "sell_ratio": round(sell / tot, 4), "slope": slope}
+                "sell_ratio": round(sell / tot, 4), "slope": slope, "net": net}
     except Exception as e:
         logger.debug(f"[data] {symbol} taker 실패: {e}")
         return neutral
