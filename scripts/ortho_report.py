@@ -26,6 +26,14 @@ BOOT_ITERS = 2000      # 부트스트랩 재표본 횟수
 BOOT_SEED  = 12345     # 재현성(같은 CSV → 같은 CI)
 Z          = 1.96      # 95% 정규 분위
 
+# ── 데이터 정합성 가드 (Phase 0-1) — triple-barrier 물리 위반 행 격리 ──────────
+#   저가 심볼의 R거리 정밀도 붕괴 등으로 손상된 행(실현R≈0인데 TP/SL 청산, MAE/MFE 폭주)이
+#   코호트에 조용히 섞여 기대값·캡처효율을 오염시킨다. 삭제가 아니라 '격리'로 배제하고 투명 보고.
+#   전부 R-정규화 임계(스케일프리)·측정 위생 도구 — 트레이딩 게이트(절대값 금지 §6)가 아니다.
+MAE_R_CAP  = 6.0       # 역행 R 상한: SL=1R+인트라바 오버슛(정상 최대 2.77R). 초과=배리어 물리 위반
+MFE_R_CAP  = 8.0       # 유리 R 상한: TP(RR≤3)+오버슛(정상 최대 5.11R). 초과=배리어 물리 위반
+R_ZERO_EPS = 0.02      # TP/SL 청산인데 |R|<이 값이면 R≈0 — 전 R/RR 이동 필수라 물리적으로 불가능
+
 
 # ════════════════════════════════════════════════════════════════════
 # 통계 헬퍼 (표준 라이브러리만 — 과적합과 무관한 '측정 신뢰도' 도구)
@@ -142,6 +150,29 @@ def _regime(r):
     return m.group(1) if m else '?'
 
 
+def _grade(r):
+    """청산 등급 복원: 채점 Note 'R=±x | GRADE | MFE../MAE..'의 2번째 토큰(TP/SL/BE/TIME).
+    없으면 None(구버전 미기록 행) — Phase 0-3에서 정식 컬럼화 예정."""
+    for tok in (t.strip() for t in (r.get('Note') or '').split('|')):
+        if tok in ('TP', 'SL', 'BE', 'TIME'):
+            return tok
+    return None
+
+
+def integrity_reasons(r):
+    """이 행이 triple-barrier 물리를 위반하면 사유 리스트, 정상이면 [] (Phase 0-1).
+       ① TP/SL 청산인데 실현 R≈0 — SL은 -1R·TP는 +RR 이동이 필수라 R≈0은 불가능.
+       ② MAE/MFE(R)가 배리어 물리 상한 초과 — R거리 정밀도 붕괴(저가 심볼)의 지표."""
+    bad = []
+    if r.get('grade') in ('TP', 'SL') and r.get('R') is not None and abs(r['R']) < R_ZERO_EPS:
+        bad.append(f"{r['grade']}청산·R≈0")
+    if r.get('mae') is not None and r['mae'] > MAE_R_CAP:
+        bad.append(f"MAE{r['mae']:.1f}R>{MAE_R_CAP:g}")
+    if r.get('mfe') is not None and r['mfe'] > MFE_R_CAP:
+        bad.append(f"MFE{r['mfe']:.1f}R>{MFE_R_CAP:g}")
+    return bad
+
+
 def load(path):
     rows = []
     with open(path, encoding='utf-8') as f:
@@ -161,6 +192,7 @@ def load(path):
             # 실현 R = (PnL%/100) * Entry / R거리.  PnL%·Entry·R거리만으로 복원 가능.
             r['R'] = ((r['pnl'] / 100.0) * r['entry'] / r['rdist']
                       if None not in (r['pnl'], r['entry'], r['rdist']) and r['rdist'] else None)
+            r['grade'] = _grade(r)          # 청산 등급(TP/SL/BE/TIME) — 정합성 가드·BE분리용
             rows.append(r)
     return rows
 
@@ -290,6 +322,11 @@ def main():
 
     rows = load(path)
     res = [r for r in rows if r['Status'] in ('WIN', 'LOSS')]
+    # Phase 0-1 정합성 가드: 배리어 물리 위반 행 격리(분석 배제) — 삭제 아님, 아래서 투명 보고.
+    quarantined = [(r, integrity_reasons(r)) for r in res]
+    quarantined = [(r, why) for r, why in quarantined if why]
+    bad_ids = {id(r) for r, _ in quarantined}
+    res = [r for r in res if id(r) not in bad_ids]
     wins = [r for r in res if r['Status'] == 'WIN']
     loss = [r for r in res if r['Status'] == 'LOSS']
     if not res:
@@ -303,11 +340,39 @@ def main():
     print("=" * 70)
     print(f"ORTHO R-리포트 — {os.path.basename(path)}  (해소 {len(res)}건)")
     print("=" * 70)
+    if quarantined:
+        # Phase 0-1: 손상 행을 숨기지 않고 명시 — 격리 사유·심볼별 집계 + 상위 표본.
+        by_sym = defaultdict(int)
+        for r, _ in quarantined:
+            by_sym[r.get('Symbol') or '?'] += 1
+        sym_str = ', '.join(f"{s}×{n}" for s, n in sorted(by_sym.items(), key=lambda x: -x[1]))
+        print(f"⚠ 정합성 격리(분석 배제): {len(quarantined)}건  [{sym_str}]")
+        for r, why in quarantined[:5]:
+            print(f"    · {str(r.get('Symbol')):10} {r.get('Status'):4} {str(r.get('grade') or '?'):4} "
+                  f"R={_fmt(r.get('R'))} MFE={_fmt(r.get('mfe'))} MAE={_fmt(r.get('mae'))}  ← {', '.join(why)}")
+        if len(quarantined) > 5:
+            print(f"    · … 외 {len(quarantined) - 5}건")
+        print("-" * 70)
     print(f"표기: ! = n<{MIN_N} 표본부족 · win[..] = 승률 Wilson95% · CI[..] = 기대값 부트스트랩95%")
     print(f"      엣지+ = 기대값 CI 하한>0 (0을 포함하면 ~노이즈, 우연일 수 있음)")
     print("-" * 70)
     print(f"승률              {len(wins)/len(res)*100:.1f}%  ({len(wins)}W / {len(loss)}L)  "
           f"Wilson95%[{wilson(len(wins), len(res))[0]:.0f}-{wilson(len(wins), len(res))[1]:.0f}]")
+    # Phase 0-2 BE 분리: Status=WIN에 flat BE가 섞여 승률을 부풀린다(진단 W5). 방향성 승률 별도 보고.
+    graded = [r for r in res if r.get('grade')]
+    if graded:
+        gc = defaultdict(int)
+        for r in graded:
+            gc[r['grade']] += 1
+        be_n = gc.get('BE', 0)
+        nonbe = [r for r in res if r.get('grade') != 'BE']   # grade=None(미기록)은 보수적으로 유지
+        dwins = sum(1 for r in nonbe if r['Status'] == 'WIN')
+        print(f"  청산등급         TP {gc.get('TP',0)} / SL {gc.get('SL',0)} / "
+              f"BE {be_n} / TIME {gc.get('TIME',0)}  (등급기록 {len(graded)}/{len(res)}건)")
+        if nonbe:
+            dlo, dhi = wilson(dwins, len(nonbe))
+            print(f"  방향성 승률      {dwins/len(nonbe)*100:.1f}%  (BE {be_n}건 제외, {dwins}W/{len(nonbe)-dwins}L)  "
+                  f"Wilson95%[{dlo:.0f}-{dhi:.0f}]  ← BE 미포함 실질 승률")
     ci = f"[{elo:+.3f}, {ehi:+.3f}]" if elo is not None else "[--]"
     print(f"기대값            {_fmt(eR)} R/거래   95%CI{ci}   {_verdict(len(res), elo, ehi)}  ← 핵심지표")
     if wR and lR:
