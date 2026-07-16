@@ -197,6 +197,11 @@ FUNDING_HIST   = _int("ORTHO_FUNDING_HIST", 60)            # funding 백분위 �
 #   모든 신호에 컬럼 적재해 코호트로 검증(측정만). 게이트 승격은 워크포워드 양구간+대칭+사전등록 후.
 #   inert: 라이브 스코어링/알림에 영향 0. 끄면 컬럼만 미적재(단일 env-var 롤백). 결측 없음(-1 sentinel).
 REGIME_AGE     = _flag("ORTHO_REGIME_AGE", "true")          # 레짐 나이 컬럼 적재 ON/OFF
+# ── Stage 2.1 VWAP 이격도(측정 전용, 게이트 아님 — Phase 2) ─────────────────
+#   진입가의 롤링VWAP 대비 ATR정규화 이격. 가설: 정렬 이격(vwap_dev×dir) 상위=추격 진입 →
+#   M1(ts_align)과 같은 계열. 측정만 적재해 코호트 검증(+ M1과 상관 |ρ|>0.6이면 중복 폐기).
+#   inert: 라이브 스코어링/알림 영향 0. 끄면 컬럼만 미적재(단일 env-var 롤백). 신규 fetch 0.
+VWAP_DEV       = _flag("ORTHO_VWAP_DEV", "true")            # VWAP 이격도 컬럼 적재 ON/OFF
 
 # ══════════════════════════════════════════════════════════════════
 # Shadow 로깅 (FN 측정 인프라 — 별도 Notion DB · ★ 기본 ON) ──────────

@@ -644,6 +644,10 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
     struct = axis_structure(c15, c1h, c4h)
     mtag = macro_tag(c4h)
     mage = macro_age_bars(c4h)          # F1 측정: 레짐 나이(4h봉) — 이 스냅샷의 전 신호 공통
+    # Stage 2.1 측정: VWAP 이격도 = (진입가−롤링VWAP)/ATR. ATR 정규화(스케일프리 §6), 부호=방향중립
+    #   (정렬값 vwap_align=vwap_dev×dir은 리포트에서 오프라인 유도 — ts_align과 동일 관례). 게이트 아님.
+    vdev = (round((entry - loc["vwap"]) / loc["atr"], 4)
+            if loc.get("vwap") is not None and loc.get("atr") else None)
 
     # R1 레짐 라우터: 켜져 있으면 라우터가 폴라리티를 결정(REV/CONT/BREAKOUT). 방향 대칭 불변.
     #   라우터 ON 시 라우터가 권위(POLARITIES 환경변수 대체) → EXPANSION→BREAKOUT 평가 가능.
@@ -719,8 +723,9 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
 
     # 넓은 조리개(A+B+C): '안 만든' near-miss 셋업을 학습/평가용 Shadow로 적재(라이브 불변).
     _aperture_explore(symbol, polarities, loc, flow, struct, c15, entry, mtag, regime, feats, signaled_at, out)
-    for s in out:                       # F1 측정 컬럼: 라이브+Shadow 전 신호에 동일 레짐나이 스탬프
-        s["macro_age"] = mage
+    for s in out:                       # 측정 컬럼: 라이브+Shadow 전 신호에 스냅샷 공통값 스탬프
+        s["macro_age"] = mage           # F1 레짐 나이
+        s["vwap_dev"]  = vdev           # Stage 2.1 VWAP 이격도
     return out
 
 
