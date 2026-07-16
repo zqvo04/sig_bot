@@ -540,6 +540,23 @@ def macro_tag(candles_4h) -> str:
     return "FLAT" if u is None else ("UPLEG" if u else "DOWNLEG")
 
 
+def macro_age_bars(candles_4h) -> int:
+    """현 macro_tag 상태(4h EMA9>EMA21)가 마지막 반전 후 유지된 4h 봉 수 (F1 측정).
+    작은 값=레짐 전환 직후(stale-side 진입 의심 구간). 순수함수(무상태)·결측 없음:
+    이력/EMA 산출 불가 시 -1 sentinel(NULL 금지). 게이트 아님 — UPLEG 손실 군집이
+    레짐 나이와 상관되는지 '측정만'(§3 측정-우선-게이트-후). 스케일프리(봉 카운트)."""
+    cur = _ema_up(candles_4h) if candles_4h and len(candles_4h) >= oc.EMA_SLOW else None
+    if cur is None:
+        return -1
+    age = 1                                        # 최신 봉 자체를 1로 계수
+    for end in range(len(candles_4h) - 1, oc.EMA_SLOW - 1, -1):
+        u = _ema_up(candles_4h[:end])              # 직전 봉 시점의 상태
+        if u is None or u != cur:                  # 반전(또는 산출불가) 지점에서 종료
+            break
+        age += 1
+    return age
+
+
 # ════════════════════════════════════════════════════════════════════
 # 5. 진입점: 한 심볼 평가 → 가상 신호 리스트 (0~2건)
 # ════════════════════════════════════════════════════════════════════
@@ -626,6 +643,7 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
     loc["vwap"] = rolling_vwap(c15, oc.W_L)     # R4 — BREAKOUT 트리거/SL 앵커
     struct = axis_structure(c15, c1h, c4h)
     mtag = macro_tag(c4h)
+    mage = macro_age_bars(c4h)          # F1 측정: 레짐 나이(4h봉) — 이 스냅샷의 전 신호 공통
 
     # R1 레짐 라우터: 켜져 있으면 라우터가 폴라리티를 결정(REV/CONT/BREAKOUT). 방향 대칭 불변.
     #   라우터 ON 시 라우터가 권위(POLARITIES 환경변수 대체) → EXPANSION→BREAKOUT 평가 가능.
@@ -701,6 +719,8 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
 
     # 넓은 조리개(A+B+C): '안 만든' near-miss 셋업을 학습/평가용 Shadow로 적재(라이브 불변).
     _aperture_explore(symbol, polarities, loc, flow, struct, c15, entry, mtag, regime, feats, signaled_at, out)
+    for s in out:                       # F1 측정 컬럼: 라이브+Shadow 전 신호에 동일 레짐나이 스탬프
+        s["macro_age"] = mage
     return out
 
 

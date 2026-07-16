@@ -191,6 +191,12 @@ SCALP_FEATS    = _flag("ORTHO_SCALP_FEATS", "true")          # 피처 수집·�
 OBI_DEPTH      = _int("ORTHO_OBI_DEPTH", 10)                 # OBI 호가 깊이 레벨(상위 N단)
 TAKER_SLOPE_LB = _int("ORTHO_TAKER_SLOPE_LB", 8)            # taker 매수비율 기울기 룩백(5m봉)
 FUNDING_HIST   = _int("ORTHO_FUNDING_HIST", 60)            # funding 백분위 표본 길이(과거 펀딩 횟수)
+# ── F1 레짐 나이(측정 전용, 게이트 아님 — Phase 1) ─────────────────────────
+#   진단: UPLEG(4h EMA)이 롱숏 양방향 손실 군집(Base −27.9R·Shadow −43R, 두 독립표본 재현).
+#   가설: 손실이 '레짐 전환 직후' stale-side 진입에 몰릴 것 → 레짐 나이(전환 후 4h봉 수)를
+#   모든 신호에 컬럼 적재해 코호트로 검증(측정만). 게이트 승격은 워크포워드 양구간+대칭+사전등록 후.
+#   inert: 라이브 스코어링/알림에 영향 0. 끄면 컬럼만 미적재(단일 env-var 롤백). 결측 없음(-1 sentinel).
+REGIME_AGE     = _flag("ORTHO_REGIME_AGE", "true")          # 레짐 나이 컬럼 적재 ON/OFF
 
 # ══════════════════════════════════════════════════════════════════
 # Shadow 로깅 (FN 측정 인프라 — 별도 Notion DB · ★ 기본 ON) ──────────
