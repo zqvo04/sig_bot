@@ -33,10 +33,11 @@ _EXTRA_PROPS = {
     "OBI":         {"number": {}},        # 호가 불균형 [-1,+1]
     "Taker Slope": {"number": {}},        # CVD 가속(매수비율 기울기)
     "Funding %":   {"number": {}},        # funding 백분위
+    "Regime Age":  {"number": {}},        # F1 레짐 나이(전환 후 4h봉 수) — 측정 전용
     "Axis Vec":    {"rich_text": {}},     # 넓은 조리개 연속 축벡터(JSON)
     "Blocked By":  {"select": {}},        # Shadow 차단/조리개 카테고리(라이브엔 무해)
 }
-_EXTRA_KEYS = ("OBI", "Taker Slope", "Funding %", "Axis Vec")   # 적재 실패 시 제거 대상
+_EXTRA_KEYS = ("OBI", "Taker Slope", "Funding %", "Regime Age", "Axis Vec")   # 적재 실패 시 제거 대상
 
 
 def ensure_schema(database_id: Optional[str] = None) -> bool:
@@ -130,6 +131,8 @@ def log_signal(sig: dict, database_id: Optional[str] = None,
             props["OBI"]         = _num(sig.get("obi"))
             props["Taker Slope"] = _num(sig.get("taker_slope"))
             props["Funding %"]   = _num(sig.get("funding_pct"))
+        if oc.REGIME_AGE:                            # F1 측정 컬럼(라이브+Shadow 공통, 게이트 아님)
+            props["Regime Age"]  = _num(sig.get("macro_age"))
         if sig.get("axis_vec"):
             props["Axis Vec"] = _txt(json.dumps(sig["axis_vec"], separators=(",", ":")))
         r = requests.post(f"{_API}/pages", headers=_h(),
