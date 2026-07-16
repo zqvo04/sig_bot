@@ -193,6 +193,11 @@ def load(path):
             r['R'] = ((r['pnl'] / 100.0) * r['entry'] / r['rdist']
                       if None not in (r['pnl'], r['entry'], r['rdist']) and r['rdist'] else None)
             r['grade'] = _grade(r)          # 청산 등급(TP/SL/BE/TIME) — 정합성 가드·BE분리용
+            # M1(사전등록): 방향-정렬 taker 기울기 = Taker Slope × dir(LONG+1/SHORT−1). 신규수집 0.
+            r['taker_slope'] = _f(r.get('Taker Slope'))
+            _d = (r.get('Direction') or '').upper()
+            r['ts_align'] = (r['taker_slope'] * (1 if _d == 'LONG' else -1)
+                             if r['taker_slope'] is not None and _d in ('LONG', 'SHORT') else None)
             rows.append(r)
     return rows
 
@@ -222,6 +227,24 @@ def cohort(res, key, title):
         d[key(r)].append(r)
     for k in sorted(d, key=lambda x: str(x)):
         _line(str(k), d[k])
+
+
+def quartile_bucketer(res, field):
+    """field 값의 4분위 경계로 버킷 라벨을 매기는 클로저 생성(자기분포 백분위 — 스케일프리 §6).
+    값 None인 행은 'n/a'. 유효 표본<4면 None 반환(버킷팅 불가)."""
+    vals = sorted(r[field] for r in res if r.get(field) is not None)
+    if len(vals) < 4:
+        return None
+    q = [vals[int(len(vals) * f)] for f in (0.25, 0.5, 0.75)]
+    def bucket(r):
+        v = r.get(field)
+        if v is None:
+            return 'n/a'
+        if v <= q[0]: return 'Q1(低)'
+        if v <= q[1]: return 'Q2'
+        if v <= q[2]: return 'Q3'
+        return 'Q4(高)'
+    return bucket
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -416,6 +439,16 @@ def main():
     cohort(res, lambda r: ('RR<1.5' if r['rr'] and r['rr'] < 1.5 else
                            'RR1.5-3' if r['rr'] and r['rr'] < 3 else
                            'RR3-5' if r['rr'] and r['rr'] < 5 else 'RR>=5'), "RR bucket")
+
+    # Phase 2 Stage 2.0 — M1 사전등록(docs/PREREG_TS_ALIGN.md) 검증 도구.
+    #   가설: ts_align 상위(Q4=진입방향 taker 쏠림=추격)일수록 기대값 열위. 대칭은 ×Direction으로 확인.
+    #   ※ 지금은 측정만 — 게이트 승격은 신규데이터에서 G1~G5(워크포워드·대칭·CI·FN) 통과 후.
+    tsb = quartile_bucketer(res, 'ts_align')
+    if tsb:
+        cohort(res, tsb, "ts_align 4분위 (정렬 taker기울기 · 高=진입방향 쏠림) [M1]")
+        cohort(res, lambda r: f"{tsb(r)}/{(r.get('Direction') or '?')}", "ts_align×Direction (대칭검증) [M1]")
+    else:
+        print("\n--- ts_align [M1]: Taker Slope 유효표본 부족 — 코호트 생략 ---")
 
     # 손실 클러스터링(문제②)
     print("\n[손실 클러스터링] 동시·연속 상관 노출")
