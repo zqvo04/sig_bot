@@ -138,8 +138,8 @@ def main():
     logger.info(f"   기존 OPEN: {len(open_idx['keys'])}건 (중복 진입 차단 기준)")
     sctx = make_shadow_ctx(open_idx, logger)   # FN 측정용 Shadow 컨텍스트(비활성 시 None)
 
-    # 측정용 컬럼(OBI·Taker Slope·Funding %·Axis Vec) 멱등 보장 — 라이브·Shadow DB 둘 다.
-    if oc.SCALP_FEATS and notion.enabled():
+    # 측정용 컬럼(OBI·Taker Slope·Funding %·Vol%·CVD Div·Vol Grade·Axis Vec) 멱등 보장 — 두 DB.
+    if (oc.SCALP_FEATS or oc.VOL_PCT or oc.CVD_DIV or oc.VOL_CONF) and notion.enabled():
         notion.ensure_schema()                                   # 라이브 DB
         if sctx is not None:
             notion.ensure_schema(oc.NOTION_SHADOW_DB_ID)         # Shadow DB

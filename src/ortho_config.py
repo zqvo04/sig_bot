@@ -207,6 +207,26 @@ REGIME_AGE     = _flag("ORTHO_REGIME_AGE", "true")          # 레짐 나이 컬�
 VWAP_DEV       = _flag("ORTHO_VWAP_DEV", "true")            # VWAP 이격도 컬럼 적재 ON/OFF
 
 # ══════════════════════════════════════════════════════════════════
+# 거래량 확신도 보조 (V — 진입 게이트 아님, 확신도 등급만) ★
+# ──────────────────────────────────────────────────────────────────
+#   목적: 거래량을 "어떤 신호를 낼지"(AND/VETO)에 넣지 않고 — 그건 §1 과적합·§3 측정우선
+#   위반 — 이미 통과한 신호에 *거래량 확증 등급(A/B/C)*을 부착해 알림·기록에 흘린다.
+#   진입 신호 집합·스코어링 불변(현행 보존). 트레이더가 보는 확신도만 거래량이 보조.
+#   세 확증(전부 자기정규화·롱숏 부호대칭, 데이터로 고른 임계 아님):
+#     ① 참여도  vol_pct ≥ P_VOL (현재 봉에 거래량 실림; BREAKOUT과 동일 컷 재사용)
+#     ② 테이커 비역행  cvd_div가 거래방향에 반대 다이버전스 아님
+#     ③ VWAP 동조  진입이 거래방향쪽 VWAP면
+#   확증 수 → A(3)/B(2)/C(≤1). 진입 결정 아님(informational). 끄려면 ORTHO_VOL_CONF=false.
+VOL_CONF       = _flag("ORTHO_VOL_CONF", "true")            # 거래량 확신도 등급 부착 ON/OFF
+# 측정 컬럼(게이트 아님): 전 신호에 거래량 백분위·CVD 다이버전스 적재 → 코호트 검증 원재료.
+VOL_PCT        = _flag("ORTHO_VOL_PCT", "true")             # 거래량 백분위 컬럼 적재 ON/OFF (rec 1)
+CVD_DIV        = _flag("ORTHO_CVD_DIV", "true")             # 가격-CVD 다이버전스 컬럼 적재 ON/OFF (rec 2)
+# 측정 위생(rec 3): 형성 중(미완성) 봉의 부분누적 거래량을 경과율로 pace 환산 → 봉내 호출시각
+#   종속 편향 제거. ★ 기본 OFF: ON 시 vol_pct가 바뀌어 BREAKOUT(P_VOL) 빈도가 변하므로 단일변수
+#   A/B로 검증 후 승격(현행 보존). CLOSED_CANDLES=true(닫힌봉)면 자동 무효(elapsed≥1) → 안전.
+VOL_PACE       = _flag("ORTHO_VOL_PACE", "false")          # 형성중봉 거래량 pace 환산 ON/OFF
+
+# ══════════════════════════════════════════════════════════════════
 # Shadow 로깅 (FN 측정 인프라 — 별도 Notion DB · ★ 기본 ON) ──────────
 #   문제: 거부권(MACRO_FRESH·crowd·taker·spread)·추격컷·리스크캡이 막은 셋업은
 #   logger.info로만 남고 어디에도 적재되지 않아 "막아서 손해였나(승자 제거=FN)
@@ -292,4 +312,5 @@ def summary() -> str:
             f"| notion={'ON' if NOTION_ENABLED else 'OFF'} "
             f"shadow={'ON(q'+(str(SHADOW_MAX_PER_RUN) if SHADOW_MAX_PER_RUN>0 else '∞')+')' if SHADOW_ENABLED else 'OFF'} "
             f"aperture={'ON(δ'+format(APERTURE_DELTA,'g')+')' if APERTURE_EXPLORE else 'OFF'} "
-            f"explore={len(EXPLORE_SYMBOLS)}sym scalp={'ON' if SCALP_FEATS else 'OFF'}")
+            f"explore={len(EXPLORE_SYMBOLS)}sym scalp={'ON' if SCALP_FEATS else 'OFF'} "
+            f"volConf={'ON' if VOL_CONF else 'OFF'} volPace={'ON' if VOL_PACE else 'OFF'}")

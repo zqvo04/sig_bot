@@ -279,12 +279,64 @@ def rolling_vwap(candles_15m, window) -> Optional[float]:
     return num / den if den > 0 else None
 
 
-def vol_surge_pct(candles_15m, window) -> Optional[float]:
-    """현재 봉 거래량의 최근 window 분포 내 백분위(0~100). 절대 150% 대신 자기정규화."""
+def vol_surge_pct(candles_15m, window, now_ms=None, tf_ms=None) -> Optional[float]:
+    """현재 봉 거래량의 최근 window 분포 내 백분위(0~100). 절대 150% 대신 자기정규화.
+    rec3 측정위생: VOL_PACE ON 且 마지막 봉이 형성 중(now_ms·tf_ms 제공)이면 경과율로 pace
+    환산 — 봉 초반 부분누적 거래량을 완성봉 분포와 비교하던 '봉내 호출시각 종속' 편향을 제거.
+    닫힌 봉(CLOSED_CANDLES=true)이면 elapsed≥1 → 무변경(안전). 경과율 하한 0.15로 초반 외삽폭주 억제."""
     vols = [float(c[5]) for c in candles_15m[-window:]]
     if len(vols) < max(2, window // 2):
         return None
+    if oc.VOL_PACE and now_ms and tf_ms:
+        elapsed = (now_ms - candles_15m[-1][0]) / tf_ms
+        if 0 < elapsed < 1.0:                       # 형성 중 봉만 — 닫힌 봉은 무변경
+            vols = vols[:-1] + [vols[-1] / max(elapsed, 0.15)]
     return percentile_rank(vols[-1], vols)
+
+
+def cvd_divergence(closes, window, taker_net) -> Optional[float]:
+    """rec2 가격-CVD 다이버전스: 가격 순변화 방향과 순-테이커압력(taker_net) 부호의 불일치.
+      +값 = 약세 다이버전스(가격↑ 이나 매도압력 우위)  −값 = 강세 다이버전스(가격↓ 이나 매수압력)
+       0   = 동조(다이버전스 없음)
+    크기 = |taker_net|(압력 강도, [0,1] 스케일프리). 부호만으로 방향 대칭(절대 가격/거래량 아님).
+    신규 fetch 0 — 이미 수집한 taker_net + closes 재사용. 측정 컬럼(게이트 아님)."""
+    if taker_net is None or len(closes) < window + 1:
+        return None
+    price_chg = closes[-1] - closes[-1 - window]
+    if price_chg == 0 or taker_net == 0:
+        return 0.0
+    price_dir = 1.0 if price_chg > 0 else -1.0
+    press_dir = 1.0 if taker_net > 0 else -1.0
+    if price_dir == press_dir:
+        return 0.0                                  # 가격·압력 동조 = 다이버전스 없음
+    return round(price_dir * abs(taker_net), 4)     # 가격↑·매도압력 → +(약세), 반대 → −(강세)
+
+
+def volume_confidence(direction, vol_pct, cvd_div, vwap_dev) -> tuple:
+    """거래량 3확증 집계 → 등급(A/B/C, 확증수). ★진입 결정 아님(informational) — AND/VETO·
+    스코어링 불변. 이미 통과한 신호에 붙는 '트레이더용 확신도 메타'일 뿐(점수 가산 아님).
+    확증(전부 방향 대칭, 데이터로 고른 임계 아님):
+      ① 참여도    vol_pct ≥ P_VOL (BREAKOUT과 동일 컷 재사용 — 새 임계 0)
+      ② 테이커 비역행  cvd_div가 진입 방향에 반대 다이버전스 아님
+      ③ VWAP 동조  진입이 진입 방향쪽 VWAP면(vwap_dev 부호)
+    REV 등 역추세 셋업은 ②③가 자연히 덜 켜져 등급이 낮게 나온다 — 버그 아니라 '방향 확증 약함'을
+    정직히 표시(추세동조 관점). 결측 확증은 미가산(보수적)."""
+    d = (direction or "").lower()
+    n = 0
+    if vol_pct is not None and vol_pct >= oc.P_VOL:
+        n += 1
+    if cvd_div is not None:
+        if d == "long" and cvd_div <= 0:            # 약세 다이버전스 아님
+            n += 1
+        elif d == "short" and cvd_div >= 0:         # 강세 다이버전스 아님
+            n += 1
+    if vwap_dev is not None:
+        if d == "long" and vwap_dev >= 0:
+            n += 1
+        elif d == "short" and vwap_dev <= 0:
+            n += 1
+    grade = "A" if n >= 3 else ("B" if n == 2 else "C")
+    return grade, n
 
 
 def _range_break(candles_15m, cur) -> Optional[str]:
@@ -302,8 +354,8 @@ def _range_break(candles_15m, cur) -> Optional[str]:
     return None
 
 
-def _decide_breakout(candles_15m, loc, flow) -> Optional[str]:
-    surge = vol_surge_pct(candles_15m, oc.W_L)
+def _decide_breakout(candles_15m, loc, flow, surge) -> Optional[str]:
+    # surge = vol_surge_pct(pace 반영) — evaluate가 컬럼용으로 계산한 값을 재사용(이중계산 방지).
     if surge is None or surge < oc.P_VOL:      # 거래량 동반 없으면 돌파 무시
         return None
     closes = _closes(candles_15m)
@@ -649,6 +701,12 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
     #   (정렬값 vwap_align=vwap_dev×dir은 리포트에서 오프라인 유도 — ts_align과 동일 관례). 게이트 아님.
     vdev = (round((entry - loc["vwap"]) / loc["atr"], 4)
             if loc.get("vwap") is not None and loc.get("atr") else None)
+    # 거래량 확신도 원재료(스냅샷 공통): vol_pct(rec1·pace반영) + cvd_div(rec2). BREAKOUT 게이트와
+    #   같은 값을 재사용해 gate·컬럼·등급이 일관. taker_net은 이미 수집(신규 fetch 0).
+    tf_ms_15 = exchange.parse_timeframe(oc.TF_ENTRY) * 1000
+    vpct = vol_surge_pct(c15, oc.W_L, now_ms, tf_ms_15)
+    feats = _scalp_feats(context)        # 스캘핑 미시구조 피처(모든 신호 컬럼에 동봉)
+    cdiv = cvd_divergence(_closes(c15), oc.W_F, (feats or {}).get("taker_net"))
 
     # R1 레짐 라우터: 켜져 있으면 라우터가 폴라리티를 결정(REV/CONT/BREAKOUT). 방향 대칭 불변.
     #   라우터 ON 시 라우터가 권위(POLARITIES 환경변수 대체) → EXPANSION→BREAKOUT 평가 가능.
@@ -664,7 +722,6 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
 
     spread = None
     out: List[Dict] = []
-    feats = _scalp_feats(context)        # 스캘핑 미시구조 피처(모든 신호 컬럼에 동봉)
 
     def _shadow(reason: str):
         """차단된 셋업을 Shadow 후보로 적재(FN 측정용). 배리어가 유효(RR≥RR_MIN)할 때만 —
@@ -679,7 +736,7 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
 
     for polarity in polarities:
         if polarity == "BREAKOUT":
-            direction = _decide_breakout(c15, loc, flow)
+            direction = _decide_breakout(c15, loc, flow, vpct)
         else:
             direction = _decide_direction(polarity, loc, flow, struct, context)
         if direction is None:
@@ -727,6 +784,14 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
     for s in out:                       # 측정 컬럼: 라이브+Shadow 전 신호에 스냅샷 공통값 스탬프
         s["macro_age"] = mage           # F1 레짐 나이
         s["vwap_dev"]  = vdev           # Stage 2.1 VWAP 이격도
+        s["vol_pct"]   = vpct           # rec1 거래량 백분위(측정)
+        s["cvd_div"]   = cdiv           # rec2 가격-CVD 다이버전스(측정)
+        # 거래량 확신도 등급: 방향별로 계산해 부착(진입 불변, 알림·기록용 메타). 부호대칭.
+        if oc.VOL_CONF:
+            g, ncf = volume_confidence(s["direction"], vpct, cdiv, vdev)
+            s["vol_grade"]  = g
+            s["vol_conf_n"] = ncf
+            s["reason"]     = f"{s['reason']} VOL={g}({ncf}/3)"
     return out
 
 

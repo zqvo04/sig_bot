@@ -36,10 +36,14 @@ _EXTRA_PROPS = {
     "Funding %":   {"number": {}},        # funding 백분위
     "Regime Age":  {"number": {}},        # F1 레짐 나이(전환 후 4h봉 수) — 측정 전용
     "VWAP Dev":    {"number": {}},        # Stage 2.1 VWAP 이격도(ATR정규화) — 측정 전용
+    "Vol %":       {"number": {}},        # rec1 거래량 백분위(pace 반영 가능) — 측정 전용
+    "CVD Div":     {"number": {}},        # rec2 가격-CVD 다이버전스(±) — 측정 전용
+    "Vol Grade":   {"select": {}},        # 거래량 확신도 등급 A/B/C (informational)
     "Axis Vec":    {"rich_text": {}},     # 넓은 조리개 연속 축벡터(JSON)
     "Blocked By":  {"select": {}},        # Shadow 차단/조리개 카테고리(라이브엔 무해)
 }
-_EXTRA_KEYS = ("OBI", "Taker Slope", "Taker Net", "Funding %", "Regime Age", "VWAP Dev", "Axis Vec")   # 적재 실패 시 제거 대상
+_EXTRA_KEYS = ("OBI", "Taker Slope", "Taker Net", "Funding %", "Regime Age", "VWAP Dev",
+               "Vol %", "CVD Div", "Vol Grade", "Axis Vec")   # 적재 실패 시 제거 대상
 
 
 def ensure_schema(database_id: Optional[str] = None) -> bool:
@@ -138,6 +142,12 @@ def log_signal(sig: dict, database_id: Optional[str] = None,
             props["Regime Age"]  = _num(sig.get("macro_age"))
         if oc.VWAP_DEV:                              # Stage 2.1 측정 컬럼(게이트 아님)
             props["VWAP Dev"]    = _num(sig.get("vwap_dev"))
+        if oc.VOL_PCT:                               # rec1 거래량 백분위(측정)
+            props["Vol %"]       = _num(sig.get("vol_pct"))
+        if oc.CVD_DIV:                               # rec2 가격-CVD 다이버전스(측정)
+            props["CVD Div"]     = _num(sig.get("cvd_div"))
+        if oc.VOL_CONF and sig.get("vol_grade"):     # 거래량 확신도 등급(informational)
+            props["Vol Grade"]   = _sel(sig.get("vol_grade"))
         if sig.get("axis_vec"):
             props["Axis Vec"] = _txt(json.dumps(sig["axis_vec"], separators=(",", ":")))
         r = requests.post(f"{_API}/pages", headers=_h(),
