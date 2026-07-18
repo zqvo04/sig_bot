@@ -49,6 +49,21 @@ def _fmt(p, sym):
     return f"{p:,.2f}" if any(s in sym for s in ("BTC", "ETH")) else f"{p:,.4f}"
 
 
+_GRADE_ICON = {"A": "🟩", "B": "🟨", "C": "⬜"}
+
+
+def _vol_line(sig: dict) -> str:
+    """거래량 확신도 등급 줄(있을 때만). 진입 결정 아님 — 참고용 확증 강도."""
+    g = sig.get("vol_grade")
+    if not g:
+        return ""
+    icon = _GRADE_ICON.get(g, "")
+    vp = sig.get("vol_pct")
+    vp_txt = f"Vol%={vp:.0f} " if vp is not None else ""
+    return (f"{icon} 거래량확증 <b>{g}</b> ({sig.get('vol_conf_n','?')}/3) "
+            f"· {vp_txt}<i>(참고)</i>\n")
+
+
 def build_message(sig: dict) -> str:
     d = sig["direction"]
     head = _DIR_ICON.get(d, d.upper())
@@ -64,6 +79,7 @@ def build_message(sig: dict) -> str:
         f"───────────────\n"
         f"위치 L={sig.get('l_pct')}  흐름 F={sig.get('f_pct')}  구조 {sig.get('s_state')}\n"
         f"국면 {sig.get('macro_tag')}\n"
+        f"{_vol_line(sig)}"
         f"💰 수량 <b>{sig.get('size')}</b> (≈{sig.get('notional')} USDT) · "
         f"위험 {sig.get('risk_quote')} USDT = 1R({sig.get('risk_pct')}%)\n"
         f"⏱ 타임스톱 {sig.get('bars_limit')}봉(15m) · BE +{oc.BE_TRIGGER_R}R\n"
