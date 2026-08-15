@@ -39,11 +39,25 @@ _EXTRA_PROPS = {
     "VWAP Dev":    {"number": {}},        # Stage 2.1 VWAP 이격도(ATR정규화) — 측정 전용
     "Vol %":       {"number": {}},        # rec1 거래량 백분위(pace 반영 가능) — 측정 전용
     "CVD Div":     {"number": {}},        # rec2 가격-CVD 다이버전스(±) — 측정 전용
-    "Vol Grade":   {"select": {}},        # 거래량 확신도 등급 A/B/C (informational)
+    "Vol Grade":   {"select": {"options": [
+        {"name": "A", "color": "green"}, {"name": "B", "color": "yellow"},
+        {"name": "C", "color": "gray"},
+    ]}},                           # 거래량 확신도 등급 A/B/C (informational)
     "Axis Vec":    {"rich_text": {}},     # 넓은 조리개 연속 축벡터(JSON)
-    "Blocked By":  {"select": {}},        # Shadow 차단/조리개 카테고리(라이브엔 무해)
+    "Blocked By":  {"select": {"options": [
+        {"name": "MACRO_FRESH", "color": "orange"}, {"name": "FLOW_FLOOR", "color": "yellow"},
+        {"name": "CHASE", "color": "blue"}, {"name": "CROWD", "color": "purple"},
+        {"name": "TAKER", "color": "pink"}, {"name": "SPREAD", "color": "brown"},
+        {"name": "SLOT", "color": "gray"}, {"name": "DIRCAP", "color": "default"},
+        {"name": "EXPLORE:DROP_L", "color": "blue"}, {"name": "EXPLORE:DROP_F", "color": "blue"},
+        {"name": "EXPLORE:DROP_S", "color": "blue"}, {"name": "EXPLORE:UNIVERSE", "color": "blue"},
+    ]}},                           # Shadow 차단/조리개 카테고리(라이브엔 무해)
     # ORTHO-4 계보·상태·비용 0 성과 원장. 별도 전용 필드를 써 Note 파싱을 제거한다.
-    "V4 Stage":              {"select": {}},
+    "V4 Stage":              {"select": {"options": [
+        {"name": "ARMED", "color": "blue"}, {"name": "LIVE", "color": "green"},
+        {"name": "ALPHA_SHADOW", "color": "purple"}, {"name": "EXEC_REJECT", "color": "gray"},
+        {"name": "APERTURE", "color": "yellow"},
+    ]}},
     "Decision ID":           {"rich_text": {}},
     "Strategy ID":           {"rich_text": {}},
     "Git SHA":               {"rich_text": {}},
@@ -52,14 +66,23 @@ _EXTRA_PROPS = {
     "Snapshot At":           {"date": {}},
     "Market Snapshot Hash":  {"rich_text": {}},
     "Quote At":              {"date": {}},
-    "Cost Mode":             {"select": {}},
+    "Cost Mode":             {"select": {"options": [
+        {"name": "SIM_COST_0", "color": "green"}, {"name": "REAL_COST", "color": "red"},
+    ]}},
     "Estimated Cost R":      {"number": {}},
     "Realized Cost R":       {"number": {}},
     "Gross R":               {"number": {}},
     "Net R":                 {"number": {}},
     "Net RR":                {"number": {}},
-    "Fill State":            {"select": {}},
-    "Veto Class":            {"select": {}},
+    "Fill State":            {"select": {"options": [
+        {"name": "NOT_APPLICABLE", "color": "gray"}, {"name": "SIM_FILLED", "color": "green"},
+        {"name": "NOT_FILLED", "color": "yellow"}, {"name": "EXPIRED", "color": "orange"},
+        {"name": "REJECTED", "color": "red"},
+    ]}},
+    "Veto Class":            {"select": {"options": [
+        {"name": "NONE", "color": "green"}, {"name": "ALPHA", "color": "purple"},
+        {"name": "EXECUTION", "color": "gray"}, {"name": "APERTURE", "color": "yellow"},
+    ]}},
     "Veto Reason V4":        {"rich_text": {}},
     "Entry Drift R":         {"number": {}},
     "Risk Budget":           {"number": {}},

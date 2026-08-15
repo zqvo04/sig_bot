@@ -84,6 +84,17 @@ class OrthoV4ContractTests(unittest.TestCase):
         with patch.object(oc, "V4_ENABLED", False):
             self.assertEqual(engine.context_veto("long", empty_context, 999.0), "spread(999.0bps)")
 
+    def test_v4_select_schema_declares_all_runtime_values(self):
+        expected = {
+            "V4 Stage": {"ARMED", "LIVE", "ALPHA_SHADOW", "EXEC_REJECT", "APERTURE"},
+            "Cost Mode": {"SIM_COST_0", "REAL_COST"},
+            "Fill State": {"NOT_APPLICABLE", "SIM_FILLED", "NOT_FILLED", "EXPIRED", "REJECTED"},
+            "Veto Class": {"NONE", "ALPHA", "EXECUTION", "APERTURE"},
+        }
+        for prop, expected_names in expected.items():
+            options = notion._EXTRA_PROPS[prop]["select"]["options"]
+            self.assertEqual({option["name"] for option in options}, expected_names)
+
     def test_notion_payload_writes_v4_fields(self):
         with patch.object(oc, "NOTION_TOKEN", "token"), \
              patch.object(oc, "NOTION_DATABASE_ID", "db"), \
