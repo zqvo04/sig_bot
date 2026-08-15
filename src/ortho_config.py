@@ -65,6 +65,17 @@ NOTION_VERSION     = "2022-06-28"
 OKX_BASE  = "https://www.okx.com/api/v5"
 LOG_LEVEL = _str("LOG_LEVEL", "INFO").upper()
 
+# ══════════════════════════════════════════════════════════════════
+# ORTHO-4 가상캠페인 계약
+# ──────────────────────────────────────────────────────────────────
+# 사용자 확정: 현재 캠페인은 비용 0 가상 성과만 기록한다. 실체결 전환은 별도
+# Strategy ID와 REAL_COST 캠페인으로만 허용하며, 이 코드 경로에서는 선택할 수 없다.
+V4_ENABLED      = _flag("ORTHO_V4_ENABLED", "true")
+STRATEGY_ID      = _str("ORTHO_STRATEGY_ID", "ORTHO-4.SIM0")
+COST_MODE        = "SIM_COST_0"
+GIT_SHA          = _str("GITHUB_SHA", "local")
+WORKFLOW_RUN_ID  = _str("GITHUB_RUN_ID", "local")
+
 # 모니터링 심볼 (라이브 — 알림·라이브 DB 적재)
 SYMBOLS = ["BTC/USDT", "ETH/USDT", "HYPE/USDT", "SOL/USDT", "SUI/USDT", "XRP/USDT"]
 
@@ -112,8 +123,10 @@ MAX_POS_DIR    = _int("ORTHO_MAX_POS_DIR", 2)        # #12 방향별 동시 슬�
 RISK_PER_TRADE     = _float("ORTHO_RISK_PER_TRADE", 100)
 # A-1 본전스톱: +BE_TRIGGER_R 도달 시 손절을 진입가(+BE_LOCK_R)로 이동. 0=비활성.
 #     BE_LOCK_R 은 수수료/슬리피지 버퍼 겸 WIN/LOSS 이분채점의 0-PnL 모호성 제거용.
-BE_TRIGGER_R       = _float("ORTHO_BE_TRIGGER_R", 1.0)
-BE_LOCK_R          = _float("ORTHO_BE_LOCK_R", 0.05)
+# ORTHO-4 비용 0 baseline에서는 BE를 본선에서 중지한다. 기존 환경변수는
+# V3 호환 모드(V4_ENABLED=false)에서만 해석한다.
+BE_TRIGGER_R       = 0.0 if V4_ENABLED else _float("ORTHO_BE_TRIGGER_R", 1.0)
+BE_LOCK_R          = 0.0 if V4_ENABLED else _float("ORTHO_BE_LOCK_R", 0.05)
 # A-3 포트폴리오 방향 노출 캡: 전 심볼 통틀어 동시 OPEN 동일방향 한도(상관 바스켓 상한).
 #     크립토는 BTC에 ~0.8+ 상관 → 동시 5숏 = 사실상 한 포지션 5배. 큰 값=사실상 무제한.
 MAX_CONCURRENT_DIR = _int("ORTHO_MAX_CONCURRENT_DIR", 3)
@@ -267,7 +280,9 @@ N_HTF_FETCH  = 60      # 1h/4h 구조축용
 # 진입 가격 기준. 기본 OFF = 형성 중(미완성) 봉 종가 = 실시간 시장가 진입(스캘핑 현실 정합).
 #   ON(opt-in)이면 미완성 봉 드롭 → entry·전축·Signaled At이 '마지막 닫힌 봉'에 앵커링(차트와
 #   정확히 일치·재현가능 기록용). 실시간 진입은 봉 중간값이라 차트 완성봉과 다를 수 있음(정상). 단일변수.
-CLOSED_CANDLES = _flag("ORTHO_CLOSED_CANDLES", "false")
+# V4 본선은 시간 정렬 편향을 막기 위해 항상 닫힌 봉만 쓴다. V3 호환 모드에서만
+# 기존 환경변수 opt-in 동작을 유지한다.
+CLOSED_CANDLES = True if V4_ENABLED else _flag("ORTHO_CLOSED_CANDLES", "false")
 
 # ── 폴라리티: 어떤 셋업을 기록할지 ───────────────────────────────
 #   학습기간엔 둘 다 기록해 A/B 비교 → 우위 폴라리티만 남기는 식으로 발전
@@ -296,7 +311,8 @@ def cont_pullback_band():
 
 
 def summary() -> str:
-    return (f"ALERT={'ON' if ALERT_ENABLED else 'OFF(학습)'} "
+    return (f"V4={'SIM_COST_0' if V4_ENABLED else 'OFF'}[{STRATEGY_ID}] "
+            f"ALERT={'ON' if ALERT_ENABLED else 'OFF(학습)'} "
             f"| W_L={W_L} P_EXT={P_EXT} W_F={W_F} P_FLOW={P_FLOW} RR_MIN={RR_MIN} "
             f"| POLARITIES={','.join(POLARITIES)} "
             f"| regime={'ON('+ROUTER_MODE+',ER'+format(TREND_ER,'g')+'/vol'+str(int(VOL_HI))+'/pvol'+str(int(P_VOL))+')' if REGIME_ROUTER else 'OFF'} "
@@ -308,6 +324,7 @@ def summary() -> str:
             f"floor={'S<'+format(FLOW_FLOOR_PCT,'g') if FLOW_FLOOR_PCT>0 else 'OFF'}"
             f"{('/L>'+format(100-FLOW_CEIL_PCT,'g')) if FLOW_CEIL_PCT>0 else ''} "
             f"| risk={RISK_PER_TRADE:g}U BE@{BE_TRIGGER_R}R/+{BE_LOCK_R}R "
+            f"cost={COST_MODE} cfg=dynamic "
             f"maxDir={MAX_CONCURRENT_DIR} RR_MAX={RR_MAX} "
             f"| notion={'ON' if NOTION_ENABLED else 'OFF'} "
             f"shadow={'ON(q'+(str(SHADOW_MAX_PER_RUN) if SHADOW_MAX_PER_RUN>0 else '∞')+')' if SHADOW_ENABLED else 'OFF'} "

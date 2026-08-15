@@ -25,6 +25,7 @@ from typing import List, Dict, Optional
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 import ortho_config as oc
+import ortho_v4 as v4
 import timeutil
 # ortho_data(ccxt 의존)는 실제 fetch가 필요한 evaluate()에서 지연 import —
 # 순수 축 로직(axis_*/veto/barriers)은 ccxt 없이도 import·단위테스트 가능.
@@ -448,7 +449,9 @@ def context_veto(direction, context, spread_bps) -> Optional[str]:
         against = tk.get("sell_ratio", 0.5) if d == "long" else tk.get("buy_ratio", 0.5)
         if against >= oc.TAKER_VETO:
             return f"taker({against:.2f})"
-    if spread_bps is not None and spread_bps > oc.SPREAD_MAX_BPS:
+    # ORTHO-4.SIM0은 사용자가 확정한 비용 0 가상캠페인이다. 따라서 스프레드는
+    # 알파 VETO가 아니며 본선 후보를 차단하지 않는다. V3 호환 모드에서만 유지한다.
+    if (not oc.V4_ENABLED) and spread_bps is not None and spread_bps > oc.SPREAD_MAX_BPS:
         return f"spread({spread_bps:.1f}bps)"
     return None
 
@@ -658,7 +661,9 @@ def _build_signal(symbol, polarity, direction, entry, b, loc, flow, struct,
     if blocked_by:
         sig["shadow"] = True
         sig["blocked_by"] = blocked_by
-    return sig
+    # V4에서는 모든 후보가 먼저 ARMED snapshot이 된다. 실제 원장에 적재될 때만
+    # LIVE/ALPHA_SHADOW/EXEC_REJECT/APERTURE로 materialize된다.
+    return v4.enrich_signal(sig, oc, materialized=False)
 
 
 def _drop_forming(exchange, candles, tf, now_ms):
@@ -763,7 +768,9 @@ def evaluate(exchange, symbol: str, context: dict) -> List[Dict]:
             logger.info(f"[engine] {symbol} {polarity} {direction} VETO:{ffv}")
             _shadow("FLOW_FLOOR")
             continue
-        if spread is None:
+        # 비용 0 V4 캠페인에서는 스프레드가 후보 제거 조건이 아니므로 불필요한
+        # 호가 조회를 생략한다. 실제 비용 캠페인은 V3 호환 경로에서 별도 구현한다.
+        if spread is None and not oc.V4_ENABLED:
             spread = od.fetch_spread_bps(exchange, symbol)
         veto = context_veto(direction, context, spread)
         if veto:

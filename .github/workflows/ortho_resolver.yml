@@ -35,13 +35,15 @@ jobs:
           OKX_PASSPHRASE:     ${{ secrets.OKX_PASSPHRASE }}
           NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          # ORTHO-4 비용 0 가상캠페인 결과 원장. 실체결 비용 모드는 별도 워크플로로 분리한다.
+          ORTHO_V4_ENABLED:     "true"
+          ORTHO_STRATEGY_ID:    "ORTHO-4.SIM0"
           # Shadow DB도 같은 채점기로 채점(활성 시). 셋 다 있어야 활성.
           NOTION_SHADOW_DB_ID: ${{ secrets.NOTION_SHADOW_DB_ID }}
           ORTHO_SHADOW_LOG:    ${{ vars.ORTHO_SHADOW_LOG }}
           LOG_LEVEL:          ${{ vars.LOG_LEVEL }}
-          # 채점 정합: 생성기와 동일한 본전스톱·보유한도를 써야 라벨이 일관(불일치 시 WIN/LOSS 왜곡).
-          ORTHO_BE_TRIGGER_R: ${{ vars.ORTHO_BE_TRIGGER_R }}
-          ORTHO_BE_LOCK_R:    ${{ vars.ORTHO_BE_LOCK_R }}
+          # ORTHO-4는 BE를 중지하고 CLOSED_CANDLES snapshot의 고정 배리어를 채점한다.
+          # T_MAX만 생성기와 공유한다.
           ORTHO_T_MAX:        ${{ vars.ORTHO_T_MAX }}
           ORTHO_RESOLVER_MAX: ${{ vars.ORTHO_RESOLVER_MAX }}
         run: python src/ortho_resolver.py

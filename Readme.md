@@ -17,6 +17,22 @@ GitHub Actions로 무인 운영, Notion에 기록·채점, 텔레그램 알림(O
 
 ---
 
+## ORTHO-4 비용 0 가상캠페인
+
+현재 기본 경로는 **`ORTHO-4.SIM0`**이다. 이는 실주문이 아닌 비용 0 가상채점 전용이며, 모든 전략 축은 마지막 **닫힌 봉**에서만 확정한다. 신규 신호는 먼저 `ARMED` snapshot으로 생성되고 Notion 원장 적재 시에만 `LIVE`, `ALPHA_SHADOW`, `EXEC_REJECT`, `APERTURE`로 분류된다.
+
+| 계약 | ORTHO-4 처리 |
+|---|---|
+| 비용 | `Cost Mode=SIM_COST_0`, `Estimated Cost R=0`, `Realized Cost R=0` |
+| 성과 | `Gross R=Net R`, `Net RR=RR` — 전용 수치 슬롯에 기록 |
+| 계보 | `Decision ID`, `Strategy ID`, `Git SHA`, `Config Hash`, `Workflow Run ID`, snapshot hash를 모든 신규 행에 기록 |
+| Shadow | Alpha VETO(`MACRO_FRESH`, `FLOW_FLOOR`, `CROWD`, `TAKER`)와 운영 거절(`SPREAD`, `SLOT`, `DIRCAP` 등)을 별도 `Veto Class`로 분리 |
+| BE | 비용 0 기준선에서는 비활성화. 이후 실제 비용 캠페인에서만 별도 가설로 검증 |
+
+> `SIM_COST_0`의 성과는 실제 체결 경제성을 뜻하지 않는다. 실제 주문을 도입할 때는 별도 `Strategy ID`와 `REAL_COST` 원장을 사용하며, 두 캠페인의 성과를 합산하지 않는다.
+
+---
+
 ## ORTHO-3 엔진
 
 ### 설계 철학
@@ -68,6 +84,7 @@ src/
 ├── ortho_config.py    # 파라미터 · ALERT_ENABLED · 키
 ├── ortho_data.py      # OKX 수집 (캔들/ls/taker/스프레드)
 ├── ortho_engine.py    # L·F·S 3축·진리표·거부권·배리어·레짐·BREAKOUT (순수·무상태)
+├── ortho_v4.py        # V4 상태·계보·비용0 순 R·config hash 계약
 ├── ortho_notify.py    # 텔레그램 ON/OFF
 ├── ortho_notion.py    # Notion 기록/조회/판정
 ├── ortho_resolver.py  # 채점 (triple-barrier)
@@ -75,6 +92,7 @@ src/
 └── timeutil.py        # KST 시각
 
 scripts/
+├── create_shadow_db.py          # V4 슬롯을 포함한 Shadow DB 생성
 ├── migrate_notion_to_ortho.py   # Notion 양식 전환·삭제 (1회)
 └── ortho_report.py              # R-기준 성과 리포트 (Polarity·Regime 코호트)
 

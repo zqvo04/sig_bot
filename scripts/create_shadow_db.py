@@ -57,6 +57,8 @@ SCHEMA = {
         {"name": "SPREAD",      "color": "brown"},
         {"name": "SLOT",        "color": "gray"},
         {"name": "DIRCAP",      "color": "default"},
+        {"name": "FLOW_FLOOR",  "color": "yellow"},
+        {"name": "EXPLORE",     "color": "blue"},
     ]}},
     "Entry":       {"number": {}},
     "TP":          {"number": {}},
@@ -75,8 +77,47 @@ SCHEMA = {
     "PnL %":       {"number": {}},
     "Signaled At": {"date": {}},
     "Resolved At": {"date": {}},
-    "Note":        {"rich_text": {}},
+        "Note":        {"rich_text": {}},
+    # ORTHO-4 계보·상태·비용 0 가상성과 전용 필드.
+    "V4 Stage":             {"select": {"options": [
+        {"name": "ARMED", "color": "blue"},
+        {"name": "LIVE", "color": "green"},
+        {"name": "ALPHA_SHADOW", "color": "purple"},
+        {"name": "EXEC_REJECT", "color": "gray"},
+        {"name": "APERTURE", "color": "yellow"},
+    ]}},
+    "Decision ID":          {"rich_text": {}},
+    "Strategy ID":          {"rich_text": {}},
+    "Git SHA":              {"rich_text": {}},
+    "Config Hash":          {"rich_text": {}},
+    "Workflow Run ID":      {"rich_text": {}},
+    "Snapshot At":          {"date": {}},
+    "Market Snapshot Hash": {"rich_text": {}},
+    "Quote At":             {"date": {}},
+    "Cost Mode":            {"select": {"options": [{"name": "SIM_COST_0", "color": "green"}]}},
+    "Estimated Cost R":     {"number": {}},
+    "Realized Cost R":      {"number": {}},
+    "Gross R":              {"number": {}},
+    "Net R":                {"number": {}},
+    "Net RR":               {"number": {}},
+    "Fill State":           {"select": {"options": [
+        {"name": "NOT_APPLICABLE", "color": "gray"},
+        {"name": "SIM_FILLED", "color": "green"},
+        {"name": "NOT_FILLED", "color": "yellow"},
+        {"name": "EXPIRED", "color": "orange"},
+        {"name": "REJECTED", "color": "red"},
+    ]}},
+    "Veto Class":           {"select": {"options": [
+        {"name": "NONE", "color": "green"},
+        {"name": "ALPHA", "color": "purple"},
+        {"name": "EXECUTION", "color": "gray"},
+        {"name": "APERTURE", "color": "yellow"},
+    ]}},
+    "Veto Reason V4":       {"rich_text": {}},
+    "Entry Drift R":        {"number": {}},
+    "Risk Budget":          {"number": {}},
 }
+
 
 
 def main():

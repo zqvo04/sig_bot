@@ -113,7 +113,10 @@ def admit(sig: dict, open_idx: dict, sctx, logger) -> bool:
         logger.info(f"[{sym}] 동시 {dr.upper()} {oc.MAX_CONCURRENT_DIR}개 한도 — 상관 노출 차단")
         shadow_emit(sig, "DIRCAP", sctx, logger)
         return False
-    notion.log_signal(sig)        # 기록
+    page_id = notion.log_signal(sig)  # V4 LIVE 원장 기록
+    if not page_id:
+        logger.error(f"[{sym}] Notion LIVE 원장 기록 실패 — 알림·OPEN 반영을 중단")
+        return False
     notify.notify_signal(sig)     # ALERT_ENABLED=true 일 때만 발송
     open_idx["keys"].add((sym, pol, dr))
     open_idx["dir_count"][(sym, dr)] = open_idx["dir_count"].get((sym, dr), 0) + 1
@@ -138,8 +141,9 @@ def main():
     logger.info(f"   기존 OPEN: {len(open_idx['keys'])}건 (중복 진입 차단 기준)")
     sctx = make_shadow_ctx(open_idx, logger)   # FN 측정용 Shadow 컨텍스트(비활성 시 None)
 
-    # 측정용 컬럼(OBI·Taker Slope·Funding %·Vol%·CVD Div·Vol Grade·Axis Vec) 멱등 보장 — 두 DB.
-    if (oc.SCALP_FEATS or oc.VOL_PCT or oc.CVD_DIV or oc.VOL_CONF) and notion.enabled():
+    # V4 계보·상태·순 R 슬롯과 측정용 컬럼을 멱등 보장한다. 비용 0 가상캠페인에서는
+    # 이 스키마가 없으면 LIVE/ALPHA_SHADOW/EXEC_REJECT의 분리가 깨지므로 항상 확인한다.
+    if (oc.V4_ENABLED or oc.SCALP_FEATS or oc.VOL_PCT or oc.CVD_DIV or oc.VOL_CONF) and notion.enabled():
         notion.ensure_schema()                                   # 라이브 DB
         if sctx is not None:
             notion.ensure_schema(oc.NOTION_SHADOW_DB_ID)         # Shadow DB

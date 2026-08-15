@@ -22,6 +22,7 @@ import requests
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 import ortho_config as oc
+import ortho_v4 as v4
 import timeutil
 
 logger = logging.getLogger("ortho.notion")
@@ -41,9 +42,35 @@ _EXTRA_PROPS = {
     "Vol Grade":   {"select": {}},        # 거래량 확신도 등급 A/B/C (informational)
     "Axis Vec":    {"rich_text": {}},     # 넓은 조리개 연속 축벡터(JSON)
     "Blocked By":  {"select": {}},        # Shadow 차단/조리개 카테고리(라이브엔 무해)
+    # ORTHO-4 계보·상태·비용 0 성과 원장. 별도 전용 필드를 써 Note 파싱을 제거한다.
+    "V4 Stage":              {"select": {}},
+    "Decision ID":           {"rich_text": {}},
+    "Strategy ID":           {"rich_text": {}},
+    "Git SHA":               {"rich_text": {}},
+    "Config Hash":           {"rich_text": {}},
+    "Workflow Run ID":       {"rich_text": {}},
+    "Snapshot At":           {"date": {}},
+    "Market Snapshot Hash":  {"rich_text": {}},
+    "Quote At":              {"date": {}},
+    "Cost Mode":             {"select": {}},
+    "Estimated Cost R":      {"number": {}},
+    "Realized Cost R":       {"number": {}},
+    "Gross R":               {"number": {}},
+    "Net R":                 {"number": {}},
+    "Net RR":                {"number": {}},
+    "Fill State":            {"select": {}},
+    "Veto Class":            {"select": {}},
+    "Veto Reason V4":        {"rich_text": {}},
+    "Entry Drift R":         {"number": {}},
+    "Risk Budget":           {"number": {}},
 }
 _EXTRA_KEYS = ("OBI", "Taker Slope", "Taker Net", "Funding %", "Regime Age", "VWAP Dev",
-               "Vol %", "CVD Div", "Vol Grade", "Axis Vec")   # 적재 실패 시 제거 대상
+               "Vol %", "CVD Div", "Vol Grade", "Axis Vec",
+               "V4 Stage", "Decision ID", "Strategy ID", "Git SHA", "Config Hash",
+               "Workflow Run ID", "Snapshot At", "Market Snapshot Hash", "Quote At",
+               "Cost Mode", "Estimated Cost R", "Realized Cost R", "Gross R", "Net R",
+               "Net RR", "Fill State", "Veto Class", "Veto Reason V4", "Entry Drift R",
+               "Risk Budget")   # 스키마 미보장 DB 재시도에서 제거 대상
 
 
 def ensure_schema(database_id: Optional[str] = None) -> bool:
@@ -65,7 +92,9 @@ def ensure_schema(database_id: Optional[str] = None) -> bool:
 
 
 def enabled() -> bool:
-    return bool(oc.NOTION_ENABLED)
+    # 설정 모듈 import 시점에 계산된 플래그 대신 현재 자격증명을 본다. 테스트·재시도·
+    # 런타임 초기화 순서에서도 update_outcome이 실제 연결 상태를 정확히 반영한다.
+    return bool(oc.NOTION_TOKEN and oc.NOTION_DATABASE_ID)
 
 
 def _h():
@@ -99,6 +128,10 @@ def log_signal(sig: dict, database_id: Optional[str] = None,
     if not (oc.NOTION_TOKEN and db):
         return None
     try:
+        # 엔진의 ARMED 후보를 실제 원장 상태로 전환한다. 섀도우 사유는 명시 인자 우선으로
+        # 받아 LIVE/ALPHA_SHADOW/EXEC_REJECT/APERTURE 분류가 호출 지점과 무관하게 일관된다.
+        blocked_by = blocked_by if blocked_by is not None else sig.get("blocked_by")
+        sig = v4.enrich_signal(dict(sig), oc, materialized=True, blocked_by=blocked_by)
         d = (sig.get("direction") or "").upper()
         is_shadow = bool(blocked_by)
         title = (f"{'🌑 ' if is_shadow else ''}{sig['symbol']} {d} · {sig['polarity']} · "
@@ -127,9 +160,32 @@ def log_signal(sig: dict, database_id: Optional[str] = None,
             "Note":        _txt(f"RG={sig.get('regime','OFF')} "
                                 f"size={sig.get('size')} ({sig.get('notional')}U) "
                                 f"risk={sig.get('risk_quote')}U=1R({sig.get('risk_pct')}%) "
-                                f"| BE@{oc.BE_TRIGGER_R}R+{oc.BE_LOCK_R}R capRR{oc.RR_MAX} "
-                                f"reachK={oc.TP_REACH_K:g}"),
+                                f"| V4={sig.get('v4_stage','OFF')} {sig.get('cost_mode','')} "
+                                f"cfg={sig.get('config_hash','')[:8]} "),
         }
+        if oc.V4_ENABLED:
+            props.update({
+                "V4 Stage":             _sel(sig.get("v4_stage")),
+                "Decision ID":          _txt(sig.get("decision_id")),
+                "Strategy ID":          _txt(sig.get("strategy_id")),
+                "Git SHA":              _txt(sig.get("git_sha")),
+                "Config Hash":          _txt(sig.get("config_hash")),
+                "Workflow Run ID":      _txt(sig.get("workflow_run_id")),
+                "Snapshot At":          _date(sig.get("snapshot_at")),
+                "Market Snapshot Hash": _txt(sig.get("market_snapshot_hash")),
+                "Quote At":             _date(sig.get("quote_at")),
+                "Cost Mode":            _sel(sig.get("cost_mode")),
+                "Estimated Cost R":     _num(sig.get("estimated_cost_r")),
+                "Realized Cost R":      _num(sig.get("realized_cost_r")),
+                "Gross R":              _num(None),
+                "Net R":                _num(None),
+                "Net RR":               _num(sig.get("net_rr")),
+                "Fill State":           _sel(sig.get("fill_state")),
+                "Veto Class":           _sel(sig.get("veto_class")),
+                "Veto Reason V4":       _txt(sig.get("veto_reason_v4")),
+                "Entry Drift R":        _num(sig.get("entry_drift_r")),
+                "Risk Budget":          _num(sig.get("risk_quote")),
+            })
         if is_shadow:
             props["Blocked By"] = _sel(blocked_by)   # Shadow/조리개 카테고리 컬럼
         # 스캘핑 미시구조 피처(모든 신호) + 조리개 연속벡터(EXPLORE 행) — 측정용 컬럼.
@@ -183,6 +239,8 @@ def _parse(page):
             "sl": _p_num(p.get("SL")), "r_dist": _p_num(p.get("R Dist")),
             "bars_limit": _p_num(p.get("Bars Limit")),
             "signaled_at": _p_date(p.get("Signaled At")),
+            "cost_mode": _p_sel(p.get("Cost Mode")),
+            "v4_stage": _p_sel(p.get("V4 Stage")),
             "blocked_by": _p_sel(p.get("Blocked By")),   # Shadow 행에만 존재(라이브=None)
         }
     except Exception as e:
@@ -257,6 +315,13 @@ def update_outcome(page_id, status, mfe_r=None, mae_r=None, bars_to_exit=None,
         return False
     try:
         props = {"Status": _sel(status), "Resolved At": _date(timeutil.now_kst_iso())}
+        if oc.V4_ENABLED:
+            ledger = v4.outcome_fields(pnl_r, oc)
+            props.update({
+                "Gross R": _num(ledger["gross_r"]),
+                "Net R": _num(ledger["net_r"]),
+                "Realized Cost R": _num(ledger["realized_cost_r"]),
+            })
         if mfe_r is not None:        props["MFE R"] = _num(round(mfe_r, 3))
         if mae_r is not None:        props["MAE R"] = _num(round(mae_r, 3))
         if bars_to_exit is not None: props["Bars To Exit"] = _num(bars_to_exit)

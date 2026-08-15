@@ -37,6 +37,9 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          # ORTHO-4 비용 0 가상캠페인 — 실체결 비용 모드는 이 워크플로에서 허용하지 않는다.
+          ORTHO_V4_ENABLED:     "true"
+          ORTHO_STRATEGY_ID:    "ORTHO-4.SIM0"
           # ── Shadow 로깅(FN 측정) — 별도 DB. 셋 다 있어야 활성(없으면 inert=현행 불변) ──
           NOTION_SHADOW_DB_ID:      ${{ secrets.NOTION_SHADOW_DB_ID }}
           ORTHO_SHADOW_LOG:         ${{ vars.ORTHO_SHADOW_LOG }}
@@ -99,6 +102,6 @@ jobs:
           # 흐름-끝물 진입 차단(FLOW_FLOOR) — SHORT&F<15 누수 차단. ★ SHORT측 기본 ON(미설정 시 15). 0=OFF, LONG미러=CEIL>0
           ORTHO_FLOW_FLOOR_PCT:   ${{ vars.ORTHO_FLOW_FLOOR_PCT }}
           ORTHO_FLOW_CEIL_PCT:    ${{ vars.ORTHO_FLOW_CEIL_PCT }}
-          # 진입 가격 기준 — ★ 기본 OFF=실시간(미완성봉) 시장가 진입. true=닫힌봉 앵커링(차트정합 기록, opt-in)
-          ORTHO_CLOSED_CANDLES:   ${{ vars.ORTHO_CLOSED_CANDLES }}
+          # ORTHO-4는 코드에서 CLOSED_CANDLES=true를 강제한다. 이 레거시 변수는
+          # V3 호환 모드에서만 유효하므로 V4 워크플로에는 전달하지 않는다.
         run: python src/ortho_main.py
