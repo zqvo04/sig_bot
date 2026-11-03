@@ -1,0 +1,26 @@
+## C1 @ 1h
+
+n=4084  info={'emitted': 6471, 'warmup_dropped': 388, 'skipped_open': 1997, 'embargoed': 2, 'n': 4084, 'period': ('2023-06-01', '2025-03-01'), 'scenario': 'A', 'funding_unavailable': True}
+
+| scen | gross | cost | Net mean | CI (wider) | label |
+|---|---|---|---|---|---|
+| A | 0.036 | 0.044 | -0.009 | [-0.062, 0.041] | CI includes 0 |
+| B | 0.036 | 0.078 | -0.042 | [-0.095, 0.008] | CI includes 0 |
+| C | 0.036 | 0.103 | -0.067 | [-0.121, -0.017] | sig - |
+
+Win rate (net_A>0) 0.426, Wilson [0.411, 0.441], breakeven WR 0.430; exits {'SL': 2065, 'TP': 1430, 'TIME': 589}
+
+| side/symbol | n | Net_A mean |
+|---|---|---|
+| long | 2157 | 0.007 |
+| short | 1927 | -0.026 |
+| BTC | 809 | 0.016 |
+| ETH | 824 | -0.067 |
+| SOL | 846 | 0.023 |
+| SUI | 861 | -0.021 |
+| XRP | 744 | 0.008 |
+
+| C0 | mean | SD | 5th | 95th | min | max | shortfall slots |
+|---|---|---|---|---|---|---|---|
+| C0 | -0.081 | 0.019 | -0.111 | -0.048 | -0.125 | -0.020 | 0 |
+| C0-beta | -0.053 | 0.017 | -0.081 | -0.024 | -0.094 | -0.015 | 0 |
