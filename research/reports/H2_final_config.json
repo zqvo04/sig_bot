@@ -1,0 +1,25 @@
+{
+  "hypothesis": "H2",
+  "track": "T4",
+  "verdict": "트랙 종료",
+  "validation_candidate": false,
+  "reason": "EXPLORE core Net(A, conservative fill) = -0.138R, judgement CI [-0.161, -0.116] (upper < 0 = strong NO-GO per master §1.1); fails C0 95th pct (rank 179/200); delta plateau fails (all grid points < 0). Build loop stops at step 1 (master §4.5.2) - parts Q1..Q5 and E-series not run.",
+  "frozen_core": {
+    "signal": "C2 Bollinger(20, 2.0, population SD) on 15m, decided at bar close",
+    "delta_atr": 0.25,
+    "window_bars": 2,
+    "requote": "new signal cancels/replaces pending order",
+    "fill_model": "through (low < limit - 1 tick, i.e. >= 2 ticks on grid; short mirror); fill price = limit",
+    "evaluation_start": "close of 15m fill bar; open of fill bar if fill bar reaches SL",
+    "exit": "X0 on fill price: SL 1.5*ATR14(decision bar), TP 1.5R maker with 2-tick trade-through, 16 bars, no BE",
+    "cost_scenario": "A on filled trades",
+    "parts_adopted": [],
+    "parameter_budget_used": 1
+  },
+  "code": "research/hyp_h2.py (strategy, run_h2), research/h2_explore.py",
+  "period": ["2023-06-01", "2025-03-01"],
+  "validation_opened": false,
+  "holdout_opened": false,
+  "funding": "0 (unavailable; sign of omitted carry unknown)",
+  "caveat": "conditional on candle fill model (no queue position / partial fills / spread history)"
+}

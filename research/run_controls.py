@@ -9,6 +9,7 @@ f = lambda x, d=3: "-" if x is None else f"{x:.{d}f}"
 HEAD = ["# Controls C1/C2 — EXPLORE only (2023-06-01..2025-03-01)", "",
      "Catalog 02 §3, X0 exit, scenario A/B/C. CI = wider of percentile-bootstrap and UTC-day block CI (95%). Funding unavailable (fund_R=0). "
      "Labels: CI excludes 0 -> 'sig +/-', else 'CI includes 0'. C0 pctl = 95th of 200 per-seed mean Net_A (190th rank).", ""]
+L = []
 res = {}
 for name, fn in (("c1", C.c1), ("c2", C.c2)):
     for tf in ("1h", "15m"):
