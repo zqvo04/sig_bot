@@ -22,10 +22,13 @@ for name, fn in (("c1", C.c1), ("c2", C.c2)):
         bf = R.x0_barrier_fn(tf)
         c0 = {}
         for beta in (False, True):
-            runs = R.random_entries(T, data, range(200), bf, tf=tf, beta=beta)
-            m = sorted(st.mean(t["net"] for t in r) for r in runs.values() if r)
+            runs = {}  # one seed at a time, keep only the mean (memory: 15m has ~40k trades/seed)
+            for sd_ in range(200):
+                r = R.random_entries(T, data, [sd_], bf, tf=tf, beta=beta)[sd_]
+                runs[sd_] = (st.mean(t["net"] for t in r) if r else None, sum(r.info["shortfall"].values()))
+            m = sorted(v[0] for v in runs.values() if v[0] is not None)
             c0[beta] = dict(mean=st.mean(m), sd=st.pstdev(m), p95=m[189], p5=m[9], min=m[0], max=m[-1],
-                            shortfall=sum(sum(r.info["shortfall"].values()) for r in runs.values()))
+                            shortfall=sum(v[1] for v in runs.values()))
         a = S["A"]
         L += [f"## {name.upper()} @ {tf}", "", f"n={a['n']}  info={T.info}", "",
               "| scen | gross | cost | Net mean | CI (wider) | label |", "|---|---|---|---|---|---|"]

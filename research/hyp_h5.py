@@ -8,8 +8,8 @@ C0 = runner.random_entries (seeds 0..199): same (symbol, UTC month) counts, unif
 reference period, non-overlapping per symbol, direction Bernoulli(0.5) (C0-beta: cell long share). Barriers copy the
 geometry of a reference trade of the same symbol drawn with replacement: u = R Dist/Entry, RR = |TP-Entry|/R Dist,
 bars limit -> only timing and direction differ. Scored by harness.score (src/ortho_resolver, unmodified).
-Costs: phase1_rescore.cost_R scenarios A/B/C on both sides. Funding is EXCLUDED on both sides (fund_R = 0): C0
-funding would need per-trade rates; the omission is symmetric only to first order (direction-dependent carry).
+Costs: phase1_rescore.cost_R scenarios A/B/C on both sides. Funding (01 §2.4, phase1_rescore.fund_R) on both
+sides for the primary V4 run; --pooled excludes it on both sides (no rates before 2026-08-03).
 Candles: OKX REST via harness.ReplayExchange -> research/data/ortho_replay/ (never research/data/holdout/).
 Verdict (pre-stated): informative iff reference Net_A > C0 AND C0-beta 95th pct (190th of 200 seed means) AND
 the wider (percentile, UTC-day block) 95% CI of (reference - C0 mean) excludes 0 for both; n<30 or C0 shortfall
@@ -17,7 +17,7 @@ the wider (percentile, UTC-day block) 95% CI of (reference - C0 mean) excludes 0
 Usage: python3 research/hyp_h5.py [--pooled]   (needs research/data/notion_all.csv)"""
 import bisect, json, math, os, random, statistics as st, sys
 from collections import Counter, defaultdict
-from datetime import timezone
+from datetime import datetime, timezone
 from statistics import NormalDist
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -39,11 +39,12 @@ def _entry(t):
     return {k: t[k] for k in ("symbol", "direction", "signal_ts_ms", "entry", "tp", "sl", "r_dist", "bars_limit_15m")}
 
 
-def load_reference(csv_path, cohorts=("V4",)):
+def load_reference(csv_path, cohorts=("V4",), rates=None):
     """-> (trades, info). V4 gross/exit = logged (R from PnL%, exit via Note/§2.5 inference); V3 trades carry
     rescore=True (gross filled by rescore()). Quarantined rows (orp.integrity_reasons) are excluded."""
     rows = [r for r in orp.load(csv_path) if r.get("Status") in ("WIN", "LOSS")]
-    T, _ = prp.build_trades(rows, {s: {} for s in prp.SYMS})  # empty rates -> fund_R = 0 (excluded, see docstring)
+    T, miss = prp.build_trades(rows, rates or {s: {} for s in prp.SYMS})  # rates None -> fund_R = 0
+    info0 = {"funding_missing_ref": miss if rates else None}
     out, info = [], Counter()
     for t in T:
         if t["coh"] not in cohorts:
@@ -59,9 +60,9 @@ def load_reference(csv_path, cohorts=("V4",)):
             day=dt.astimezone(timezone.utc).date().isoformat(), month=dt.astimezone(timezone.utc).strftime("%Y-%m"),
             entry=e, tp=tp, sl=float(r["SL"]), r_dist=rd, bars_limit_15m=int(float(r["Bars Limit"])),
             u=rd / e, rr=abs(tp - e) / rd, exit=t["x"], inferred=t["inferred"], gross_R=t["gross"],
-            cost_R=t["cost"], net_R={s: t["gross"] - t["cost"][s] for s in SCENS}, rescore=t["coh"] != "V4"))
+            cost_R=t["cost"], fund_R=t["fund"], net_R=dict(t["net"]), rescore=t["coh"] != "V4"))
         info[f"n_{t['coh']}"] += 1
-    return out, dict(info)
+    return out, dict(info, **info0)
 
 
 def rescore(ref, ex, tol=0.01):
@@ -158,6 +159,21 @@ def c0(ref, data, seeds=SEEDS, beta=False):
     return out
 
 
+def add_funding(runs, rates):
+    """01 §2.4 on C0 trades: fund_R = d * sum(rate, S < t_f <= E) / u, S = entry, E = exit. -> missing count."""
+    miss = 0
+    for T in runs.values():
+        for t in T:
+            S, E = (datetime.fromtimestamp(x / 1000, timezone.utc).replace(tzinfo=None)
+                    for x in (t["signal_ts_ms"], t["exit_ts_ms"]))
+            f, _, m, _ = prp.fund_R(1 if t["direction"] == "long" else -1, t["r_dist"] / t["entry"], S, E,
+                                    rates[t["symbol"]])
+            miss += m
+            t["fund_R"], t["funding_unavailable"] = f, False
+            t["net_R"] = {s: v - f for s, v in t["net_R"].items()}
+    return miss
+
+
 # ── statistics ──────────────────────────────────────────────────────
 def val(key):
     return (lambda t: t["gross_R"]) if key == "gross" else (lambda t: t["net_R"][key])
@@ -234,13 +250,21 @@ def main(argv=()):
         return 2
     if h.oc.BE_TRIGGER_R:
         raise h.HarnessError("BE active in ortho_config (ORTHO_V4_ENABLED=false?) - V4 exits have no BE")
-    ref, info = load_reference(CSV, ("V3", "V4") if pooled else ("V4",))
+    # funding (01 §2.4): primary V4 only; pooled: V3 period predates the funding history -> excluded on both sides
+    rates = None if pooled else {s: prp.load_rates(os.path.join(h.DATA, f"okx_funding_{s}.json")) for s in prp.SYMS}
+    ref, info = load_reference(CSV, ("V3", "V4") if pooled else ("V4",), rates)
     ex, gaps = fetch(ref)
     info.update(rescore(ref, ex))
     s, e = period(ref)
     data = make_data(ex, sorted({t["symbol"] for t in ref}), s, e)
-    res = analyse(ref, c0(ref, data), c0(ref, data, beta=True))
-    res.update(info=info, gaps=gaps, period_ms=(s, e), pooled=pooled)
+    r0, rb = c0(ref, data), c0(ref, data, beta=True)
+    if rates:
+        info["funding_missing_c0"] = add_funding(r0, rates) + add_funding(rb, rates)
+        if info["funding_missing_c0"] or info["funding_missing_ref"]:
+            raise SystemExit(f"중단: 펀딩 결측 {info} (01 §2.4: 0건이어야 함)")
+    res = analyse(ref, r0, rb)
+    res.update(funding=bool(rates), mean_fund_ref=st.mean(t["fund_R"] for t in ref),
+               mean_fund_c0=st.mean(t["fund_R"] for T in r0.values() for t in T), info=info, gaps=gaps, period_ms=(s, e), pooled=pooled)
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports",
                        f"H5_results{'_pooled' if pooled else ''}.json")
     os.makedirs(os.path.dirname(out), exist_ok=True)
