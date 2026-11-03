@@ -1,0 +1,12 @@
+{
+  "hypothesis": "H6",
+  "verdict": "트랙 종료",
+  "final_config": null,
+  "reason": "step 0 kill criteria hit: 4 plateau (centre N=20 Net_A -0.0087 <= 0; neighbour N=10 -0.0168), 5 short Net_A -0.026 <= 0, 6 only 3/5 symbols > 0, 8 PBO 0.551 > 0.5. Criterion 1 (C0/C0-beta 95p) passed, 7 MDE 0.067 <= 0.10 passed.",
+  "evaluated_core": {"module": "research/hyp_h6.py", "params": {"N": 20}, "exit": "X0", "param_count": 1},
+  "period": ["2023-06-01", "2025-03-01"],
+  "validation_opened": false,
+  "holdout_opened": false,
+  "n_trials": 3,
+  "funding_unavailable": true
+}
