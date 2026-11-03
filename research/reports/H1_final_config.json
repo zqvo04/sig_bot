@@ -1,0 +1,18 @@
+{
+  "hypothesis": "H1",
+  "track": "T3",
+  "verdict": "트랙 종료",
+  "final_config": null,
+  "reason": "코어(P_pull=20)가 카탈로그 H1 중단 기준 ①③④⑤⑥⑧ 위반 — 빌드 루프 1단계에서 종료, 검증 구간 미열람",
+  "reference_core_frozen": {
+    "module": "research/hyp_h1.py",
+    "params": {"P_pull": 20, "P1": null, "P2": null, "P3": null, "P4": null, "P5": null, "P6": null, "P7": null, "P8": null,
+               "loc": "atr_pct", "ma": "sma", "vol": "wilder", "ref": "close", "trigger": "prev_high", "trend": "ema", "exit": "X0"},
+    "param_count": 1
+  },
+  "period": ["2023-06-01", "2025-03-01"],
+  "n_trials": 5,
+  "open_validation": false,
+  "open_holdout": false,
+  "funding_unavailable": true
+}
