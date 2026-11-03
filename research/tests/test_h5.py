@@ -126,6 +126,16 @@ class TestStats(unittest.TestCase):
         self.assertEqual(d["c0_p95"], 189)
         self.assertEqual(d["pct"], 95.0)
 
+    def test_add_funding_sign(self):
+        tf = R._ms("2026-09-01") + 8 * 3_600_000  # 08:00 UTC settlement
+        mk = lambda d: dict(symbol="BTC", direction=d, signal_ts_ms=tf - R.M15, exit_ts_ms=tf, entry=100.0, r_dist=1.0,
+                            net_R={s: 0.0 for s in "ABC"})
+        runs = {0: [mk("long"), mk("short")]}
+        self.assertEqual(H.add_funding(runs, {"BTC": {tf: 0.001}}), 0)
+        lo, sh = runs[0]
+        self.assertAlmostEqual(lo["fund_R"], 0.1)  # 0.001 / u(0.01): long pays
+        self.assertAlmostEqual(sh["net_R"]["A"], 0.1)  # short receives
+
     def test_analyse_smoke(self):
         ex, ref = mem_exchange(), reference()
         s, e = H.period(ref)

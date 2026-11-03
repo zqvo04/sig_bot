@@ -379,8 +379,9 @@ def run(csv_path, fund_dir, out_md, out_json, expect=EXPECT):
         if z != ver:
             sens_flag.append(f"{k}: {z}")
     P(f"- 중복 민감도가 판정 구역을 바꾸는가: {'**예** — ' + '; '.join(sens_flag) if sens_flag else '아니오(두 민감도 모두 동일 구역)'}.")
-    if s3["V4"]["inf"] > 0.05:
-        P(f"- **경고**: V4 청산유형 추론 비율 {s3['V4']['inf']*100:.1f}% > 5% — maker/taker 배분이 추론에 의존.")
+    for c in ("V4", "V3"):
+        if s3[c]["inf"] > 0.05:
+            P(f"- **경고**: {c} 청산유형 추론 비율 {s3[c]['inf']*100:.1f}% > 5% — maker/taker 배분이 추론에 의존.")
     P("- A는 비용 하한(낙관). **숨은 낙관 가정**: ① 메이커 진입 100% 체결 ② 역선택 0 ③ SL 슬리피지 0 ④ 스프레드 = 반틱. "
       "수수료율(0.02%/0.05%, VIP0)은 2차 출처, 미검증.\n")
     P("## Step 0 검증 (원본·격리 전)\n")

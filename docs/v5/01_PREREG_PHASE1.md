@@ -173,9 +173,9 @@ Notion 스키마에 청산사유(TP/SL/TIME/BE) 전용 열 **없음**. `Status`�
 
 | 실행 기록 (실행 시 채움 — 다른 절 수정 금지) | 값 |
 |---|---|
-| 추출 시각 / CSV sha256 / 행수 | — |
-| 펀딩 캐시 sha256 (6심볼) | — |
-| 코드 커밋 SHA | — |
+| 추출 시각 / CSV sha256 / 행수 | 2026-11-03 17:53 UTC(파일 mtime) / cc63005dd4a489434997abb65530b4090c45a56666369d43672a9a8a12043bb5 / 1,907 |
+| 펀딩 캐시 sha256 (6심볼) | BTC 12fa29fb955dd7e431e3a3b6afd8a8013ed2fe4f5ac20898bb1de93a185f8e1a · ETH 5843ceb6b6d3fe13d68146f523442ce1968bf00c492e914eb032e8927fcf9cd7 · HYPE cf58c161979c30eb697d173f63c17852563044c5a48decee954806cf985f2234 · SOL 2c9d7697695b66c6521964e5a7d301419d71ef2fce6bfc99c7ed99b71553e1b1 · SUI 11592f2ed630458f5f67343af02012641aee55463f403b33f0f6b4ee80e0e233 · XRP 5b891388236ff1025115298753ce367736491c74e3e9a3ed4c03bcb265f561d5 |
+| 코드 커밋 SHA | 7115092537eb2f4ef406766fe1bac4f21164bbfe (`git rev-parse HEAD`; `research/phase1_rescore.py`·테스트는 미커밋 작업트리 상태로 실행) |
 
 ## 10. 산출물·테스트
 
