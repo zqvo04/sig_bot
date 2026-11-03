@@ -30,8 +30,6 @@ def likely_cause(row, r, logged):
                       "(unconfirmed last candle at resolve time, or OKX revised a candle)")
     if r["exit_reason"] == "TIME":
         causes.append("TIME exit: live close may have come from a still-forming 5m candle")
-    if abs(logged) > 0 and abs(r["gross_r"] - logged) < 0.05:
-        causes.append("small dR: PnL% logged rounded to 0.001% / Entry, R Dist rounding in Notion")
     return "; ".join(causes) or "unknown (check signaled_at timezone / bars_limit / BE config)"
 
 
