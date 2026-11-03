@@ -54,6 +54,9 @@ def evaluate_outcome(exchange, sig: dict) -> dict:
     except Exception as e:
         logger.warning(f"[resolver] {sig.get('symbol')} OHLCV 실패: {e}")
         return res
+    if oc.RESOLVER_CLOSED_ONLY:
+        now_ms = int(datetime.now().timestamp() * 1000)
+        candles = [c for c in candles if c[0] + 300_000 <= now_ms]   # 5m 봉 종료 전이면 미완성
     if not candles:
         return res
 

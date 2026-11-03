@@ -295,6 +295,10 @@ TAKER_PERIOD = "5m"
 TAKER_LOOKBACK = 12
 
 RESOLVER_MAX_OPEN_PER_RUN = _int("ORTHO_RESOLVER_MAX", 100)
+# 채점기 형성 중 5m 봉 제외. 기본 OFF = 기존 동작(마지막 미완성 봉을 TIME 청산·카운트에 포함 →
+#   시간 한도가 실제로는 ~115분+부분봉, 청산가가 봉 중간값). ON = 닫힌 봉만 채점(V5 하니스와 동일).
+#   V4 캠페인 라벨 혼합 방지를 위해 Strategy ID를 올릴 때 함께 켤 것.
+RESOLVER_CLOSED_ONLY = _flag("ORTHO_RESOLVER_CLOSED_ONLY", "false")
 
 
 def cont_pullback_band():
