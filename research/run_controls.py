@@ -6,12 +6,14 @@ import runner as R, controls as C
 SYMS = ["BTC", "ETH", "SOL", "SUI", "XRP"]
 HERE = os.path.dirname(os.path.abspath(__file__))
 f = lambda x, d=3: "-" if x is None else f"{x:.{d}f}"
-L = ["# Controls C1/C2 — EXPLORE only (2023-06-01..2025-03-01)", "",
+HEAD = ["# Controls C1/C2 — EXPLORE only (2023-06-01..2025-03-01)", "",
      "Catalog 02 §3, X0 exit, scenario A/B/C. CI = wider of percentile-bootstrap and UTC-day block CI (95%). Funding unavailable (fund_R=0). "
      "Labels: CI excludes 0 -> 'sig +/-', else 'CI includes 0'. C0 pctl = 95th of 200 per-seed mean Net_A (190th rank).", ""]
 res = {}
 for name, fn in (("c1", C.c1), ("c2", C.c2)):
     for tf in ("1h", "15m"):
+        if len(sys.argv) > 2 and (name, tf) != tuple(sys.argv[1:3]):
+            continue
         T = R.run(fn, {"tf": tf}, SYMS, R.EXPLORE, "A")
         json.dump(dict(info=T.info, trades=list(T)), open(f"{HERE}/data/results/controls_{name}_{tf}_explore.json", "w"))
         S = {s: R.summary(T, s) for s in "ABC"}
@@ -42,4 +44,8 @@ for name, fn in (("c1", C.c1), ("c2", C.c2)):
         L.append("")
         res[(name, tf)] = (a["n"], a["mean"], a.get("ci"), c0[False]["p95"], c0[True]["p95"])
         print(name, tf, res[(name, tf)], flush=True)
-open(f"{HERE}/reports/controls_explore.md", "w").write("\n".join(L))
+        open(f"{HERE}/reports/_controls_{name}_{tf}.part", "w").write("\n".join(L))
+        L = []
+parts = [f"{HERE}/reports/_controls_{n}_{t}.part" for n in ("c1", "c2") for t in ("1h", "15m")]
+if all(os.path.exists(p) for p in parts):
+    open(f"{HERE}/reports/controls_explore.md", "w").write("\n".join(HEAD + [open(p).read() for p in parts]))
